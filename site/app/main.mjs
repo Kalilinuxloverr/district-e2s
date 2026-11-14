@@ -1,0 +1,806 @@
+/**
+ * The editor page: load a pattern backup or a single pattern, edit it in
+ * plain words, save it. The file never leaves the browser.
+ */
+import { PatternFile, Pattern, parseSinglePattern, toSinglePattern, FileError } from "../../src/pattern.mjs";
+import { fieldsOf, field } from "../../src/map/index.mjs";
+import { control, el } from "./fields.mjs";
+import { icon } from "./icons.mjs";
+import { stepEditor } from "./steps.mjs";
+import { devicePanel } from "./device.mjs";
+import { fxPanel } from "./fx.mjs";
+import { levelsPanel } from "./levels.mjs";
+import { modulationsPage } from "./modulations.mjs";
+import { samplesPage } from "./samples.mjs";
+import { samplesFilePage } from "./sampleset.mjs";
+import { doomPage } from "./doom.mjs";
+import { createMidiTransport } from "./midi.mjs";
+import { createUsbWatch } from "./usb-watch.mjs";
+import { usbIndicator } from "./usb.mjs";
+import { emulatorPanel, takeLink, findLink } from "./emulator.mjs";
+import { followDevice } from "./follow.mjs";
+import { emulatorWindow } from "./emu-window.mjs";
+import { subnav } from "./subnav.mjs";
+import { sdcardPanel } from "./sdcard.mjs";
+import { patcherPage } from "./patcher.mjs";
+import { patternToolsPage } from "./pattern-tools.mjs";
+import { rescuePage } from "./rescue.mjs";
+import { checkVerdict } from "../../data/rescue.mjs";
+import { collectMidi, midiVerdict } from "./midi-report.mjs";
+import { supportPage } from "./support.mjs";
+import { changelogPage } from "./changelog.mjs";
+import { discordPage } from "./discord.mjs";
+import { splashPage } from "./splash.mjs";
+import { terminalPanel } from "./terminal.mjs";
+import { featuresPage } from "./features.mjs";
+import { baukastenPage } from "./baukasten.mjs";
+import { scriptsPanel } from "./scripts.mjs";
+import { Terminal } from "../../src/terminal.mjs";
+import { loadBlechSet } from "../../src/patcher.mjs";
+import { patchesPresent, selectFor } from "../../src/patch.mjs";
+import { sharedProbe } from "./probe.mjs";
+import { watchForUpdate, showNews } from "./update.mjs";
+import { apply as applySettings, get as setting, holdAutoConnect, languageSwitch, releaseAutoConnect, settingsButton, settingsPage } from "./settings.mjs";
+import { toast, toastFor } from "./toast.mjs";
+import { saveFile } from "./save-file.mjs";
+import { t } from "./i18n.mjs";
+import { dropzoneClear } from "./dropzone-clear.mjs";
+
+const $ = sel => document.querySelector(sel);
+
+/** Whether Korgs build carries BLECH already; the set that says what BLECH is loads once. Unreadable counts as yes. */
+let blechSet = null;
+async function hasBlech(bytes) {
+  try {
+    blechSet ??= await loadBlechSet(async url => {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(url);
+      return res.json();
+    });
+    return (await patchesPresent(bytes, selectFor(blechSet.patches, "stock").patches)).some(p => p.present);
+  } catch {
+    return true;
+  }
+}
+
+/** The pages that read Hacktribes tables: Korgs plain build has none of them. */
+const NEEDS_TABLES = ["fx", "mod"];
+
+/** Fields a person may change in this phase: plain fields, no expert ones. */
+const editable = f => f.edit !== "readonly" && f.edit !== "expert" && f.source !== "unknown";
+
+const PART_GROUPS = [
+  ["backup.group.sound", ["sample", "oscEdit", "pitch", "glide", "voiceAssign"]],
+  ["backup.group.filter", ["filterType", "cutoff", "resonance", "egInt"]],
+  ["backup.group.mod", ["modType", "modSpeed", "modDepth"]],
+  ["backup.group.eg", ["egOn", "attack", "decay", "level", "pan"]],
+  ["backup.group.fx", ["ifxOn", "ifxType", "ifxEdit", "mfxSend", "grooveType", "grooveDepth"]],
+  ["backup.group.play", ["mute", "priority", "padVelocity", "scaleMode", "motionMode"]],
+];
+
+/** The open file, the pattern being edited and what can be undone. */
+const doc = {
+  kind: null,           // "backup" | "single"
+  fileName: null,
+  file: null,
+  pattern: null,
+  number: 1,
+  history: [],
+  open: null,
+
+  get(id, ix = []) { return this.pattern.raw(id, ix); },
+
+  set(id, ix, raw) {
+    const change = this.pattern.setRaw(id, ix, raw);
+    this.commit();
+    if (this.open) this.open.push(change);
+    else this.history.push({ number: this.number, changes: [change] });
+    updateActions();
+    return change;
+  },
+
+  /** Several writes that undo as one, such as switching a step on. */
+  group(fn) {
+    this.open = [];
+    try { fn(); } finally {
+      if (this.open.length) this.history.push({ number: this.number, changes: this.open });
+      this.open = null;
+      updateActions();
+    }
+  },
+
+  commit() { if (this.kind === "backup") this.file.replace(this.number, this.pattern); },
+
+  undo() {
+    const entry = this.history.pop();
+    if (!entry) return;
+    if (entry.number !== this.number) selectPattern(entry.number);
+    for (const change of [...entry.changes].reverse()) this.pattern.undo(change);
+    this.commit();
+    renderPattern();
+    updateActions();
+  },
+
+  bytes() { return this.kind === "backup" ? this.file.toBytes() : toSinglePattern(this.pattern); },
+};
+
+function updateActions() {
+  const loaded = !!doc.pattern;
+  window.dispatchEvent(new Event("cee:pattern-loaded"));
+  $("#cee-save").disabled = !loaded;
+  $("#cee-undo").disabled = !doc.history.length;
+  $("#cee-changes").textContent = doc.history.length ? t("backup.changes", { count: doc.history.length }) : "";
+}
+
+function section(title, children, meta = "") {
+  return el("section", { className: "ui-section" }, [
+    el("div", { className: "ui-section-head" }, [el("h2", { className: "ui-section-title", textContent: title }), meta ? el("span", { className: "ui-section-meta", textContent: meta }) : null]),
+    ...children,
+  ]);
+}
+
+const controls = [];
+function fieldControl(id, ix = []) {
+  const f = field(id);
+  const c = control(f, () => doc.get(id, ix), raw => doc.set(id, ix, raw));
+  controls.push(c);
+  return c.node;
+}
+
+let steps = null;
+let partTabs = null;
+let currentPart = 0;
+
+function partPanel(p) {
+  const known = new Set(PART_GROUPS.flatMap(([, ids]) => ids));
+  const rest = fieldsOf("pattern").filter(f => f.area === "parts" && editable(f) && !known.has(f.id.slice(5)));
+  const groups = PART_GROUPS.map(([title, ids]) =>
+    el("div", { className: "cee-group" }, [el("h3", { textContent: t(title) }), el("div", { className: "cee-grid" }, ids.map(id => fieldControl(`part.${id}`, [p])))]));
+  if (rest.length) groups.push(el("div", { className: "cee-group" }, [el("h3", { textContent: t("backup.group.more") }), el("div", { className: "cee-grid" }, rest.map(f => fieldControl(f.id, [p])))]));
+  return groups;
+}
+
+function renderPattern() {
+  controls.length = 0;
+  const main = $("#cee-main");
+  const patternFields = fieldsOf("pattern").filter(f => editable(f) && f.area === "pattern");
+  const masterFields = fieldsOf("pattern").filter(f => editable(f) && f.area === "master");
+
+  const tabs = el("div", { className: "ui-tabs cee-part-tabs" });
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", t("backup.parts"));
+  // One panel per tab, as ui.tabs expects; only the open one holds controls.
+  const panels = [];
+  for (let p = 0; p < 16; p++) {
+    const tab = el("button", { type: "button", className: "ui-tab", id: `cee-part-tab-${p}`, textContent: String(p + 1) });
+    tab.setAttribute("role", "tab");
+    tab.dataset.tab = String(p);
+    tab.setAttribute("aria-controls", `cee-part-panel-${p}`);
+    tab.setAttribute("aria-selected", String(p === currentPart));
+    tab.setAttribute("aria-label", t("backup.part", { part: p + 1 }));
+    if (p !== currentPart) tab.tabIndex = -1;
+    tabs.append(tab);
+    const panel = el("div", { className: "ui-tabpanel", id: `cee-part-panel-${p}`, tabIndex: 0, hidden: p !== currentPart });
+    panel.setAttribute("role", "tabpanel");
+    panel.setAttribute("aria-labelledby", `cee-part-tab-${p}`);
+    panels.push(panel);
+  }
+
+  steps = stepEditor(doc);
+  const name = doc.get("pattern.name") || t("backup.noName");
+  main.replaceChildren(
+    section(doc.kind === "backup" ? t("backup.patternTitle", { number: doc.number, name }) : name, [el("div", { className: "cee-grid" }, patternFields.map(f => fieldControl(f.id)))]),
+    section(t("backup.master"), [el("div", { className: "cee-grid" }, masterFields.map(f => fieldControl(f.id)))]),
+    section(t("backup.parts"), [tabs, ...panels]),
+    section(t("steps.title"), [steps.node], t("backup.part", { part: currentPart + 1 })),
+  );
+
+  const showPart = p => {
+    currentPart = p;
+    controls.length = 0;
+    panels.forEach((panel, i) => panel.replaceChildren(...(i === p ? partPanel(p) : [])));
+    steps.show(p);
+    main.querySelector(".ui-section:last-child .ui-section-meta").textContent = t("backup.part", { part: p + 1 });
+  };
+  if (window.ui?.tabs) {
+    partTabs = window.ui.tabs(tabs, { hash: false, onChange: id => showPart(Number(id)) });
+    partTabs.select(String(currentPart), { persist: false });
+  }
+  showPart(currentPart);
+}
+
+function selectPattern(n) {
+  doc.number = n;
+  doc.pattern = doc.file.pattern(n);
+  for (const b of document.querySelectorAll(".cee-pattern-list button")) b.setAttribute("aria-current", String(Number(b.dataset.n) === n));
+}
+
+function renderList() {
+  const list = el("ul", { className: "ui-list cee-pattern-list" });
+  for (let n = 1; n <= doc.file.count; n++) {
+    const b = el("button", { type: "button", className: "cee-pattern-item" }, [el("span", { className: "cee-pattern-num", textContent: String(n) }), el("span", { className: "ui-truncate", textContent: doc.file.name(n) || t("backup.noName") })]);
+    b.dataset.n = String(n);
+    list.append(el("li", {}, b));
+  }
+  list.addEventListener("click", e => {
+    const b = e.target.closest("button[data-n]");
+    if (!b) return;
+    selectPattern(Number(b.dataset.n));
+    renderPattern();
+  });
+  $("#cee-side").replaceChildren(el("h2", { className: "ui-section-title", textContent: t("backup.list") }), list);
+}
+
+async function load(file) {
+  const input = $("#cee-file");
+  const error = $("#cee-error");
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    // Parse into locals first; the open document changes only when this worked.
+    const single = bytes.length === 0x100 + 0x4000;
+    const parsed = single ? parseSinglePattern(bytes) : PatternFile.parse(bytes);
+    error.hidden = true;
+    doc.history = [];
+    doc.fileName = file.name;
+    doc.kind = single ? "single" : "backup";
+    if (single) {
+      doc.file = null;
+      doc.pattern = parsed;
+      $("#cee-split").dataset.single = "true";
+      $("#cee-side").replaceChildren();
+    } else {
+      doc.file = parsed;
+      $("#cee-split").dataset.single = "false";
+      renderList();
+      selectPattern(1);
+    }
+    $("#cee-start").hidden = true;
+    $("#cee-split").hidden = false;
+    $("#cee-loaded").textContent = (single ? t("backup.loaded.one", { file: file.name }) : t("backup.loaded.many", { file: file.name, count: doc.file.count }));
+    renderPattern();
+    updateActions();
+  } catch (e) {
+    const message = e instanceof FileError ? e.message : t("sampleset.unreadable", { error: e.message });
+    if (window.ui?.rejectFile) window.ui.rejectFile(input, message); else toast(message, "error");
+  }
+}
+
+function save() {
+  saveFile(doc.bytes(), doc.fileName || "patterns.e2sallpat");
+}
+
+/** Fetching from and sending to the device's pattern buffer. */
+function patternDevice(device) {
+  const say = (text, kind = "info") => { toast(text, kind); };
+  const update = () => {
+    const s = device.session;
+    $("#cee-pattern-device").hidden = !s;
+    $("#cee-send-pattern").disabled = !s || !doc.pattern;
+    $("#cee-pattern-undo").disabled = !s || !s.history.some(h => h.pattern);
+  };
+
+  $("#cee-fetch").addEventListener("click", async () => {
+    if (doc.history.length && !(await window.ui.confirm({ title: t("backup.fetch.confirm"), text: t("backup.fetch.confirmText"), confirmLabel: t("backup.fetch.confirmLabel"), danger: true }))) return;
+    if (device.session?.busy) return;
+    try {
+      const block = await device.session.fetchPattern();
+      doc.kind = "single";
+      doc.file = null;
+      doc.fileName = "vom-geraet.e2spat";
+      doc.history = [];
+      doc.pattern = new Pattern(block);
+      $("#cee-split").dataset.single = "true";
+      $("#cee-side").replaceChildren();
+      $("#cee-start").hidden = true;
+      $("#cee-split").hidden = false;
+      $("#cee-loaded").textContent = t("backup.fetched.buffer");
+      renderPattern();
+      updateActions();
+      say(t("backup.fetched", { name: doc.pattern.name || t("backup.noName") }), "ok");
+    } catch (e) {
+      say(t("backup.fetchFailed", { error: e.message }), "error");
+    }
+    update();
+  });
+
+  $("#cee-send-pattern").addEventListener("click", async () => {
+    const s = device.session;
+    if (!s) return;
+    const buttons = ["#cee-send-pattern", "#cee-pattern-undo", "#cee-fetch"].map(sel => $(sel));
+    buttons.forEach(b => { b.disabled = true; });
+    const release = s.reserve();
+    try {
+      await s.idle();
+      await sendPattern(s);
+    } catch (e) {
+      say(t("backup.aborted", { error: e.message }), "error");
+    } finally {
+      release();
+      buttons.forEach(b => { b.disabled = false; });
+      update();
+    }
+  });
+
+  async function sendPattern(s) {
+    let active = t("backup.unknown");
+    try { active = new Pattern(await s.fetchPattern()).name || t("backup.noName"); } catch (e) {
+      say(t("backup.noBackup", { error: e.message }), "error");
+      return;
+    }
+    const edit = { kind: "patternSend", block: Uint8Array.from(doc.pattern.bytes) };
+    const checked = await s.check(edit);
+    if (checked.verdict === "blocked") { say(t("backup.blocked", { reasons: checked.reasons.map(r => r.message).join(" ") }), "error"); return; }
+    const warnings = checked.reasons.map(r => t("backup.warning", { message: r.message })).join("\n");
+    const yes = await window.ui.confirm({
+      title: t("backup.send.title"),
+      text: `${t("backup.send.text", { name: active })}${warnings ? `\n\n${warnings}` : ""}`,
+      confirmLabel: t("backup.send.confirm"),
+    });
+    if (!yes) return;
+    say(t("backup.sending"));
+    const res = await s.apply(edit, { confirmed: checked.token });
+    if (res.ok) say(t("backup.sent", { name: active }), "ok");
+    else if (res.needsConfirmation) say(t("backup.changed"), "error");
+    else if (res.gate?.verdict === "blocked") say(t("backup.blocked", { reasons: res.gate.reasons.map(r => r.message).join(" ") }), "error");
+    else say(`${res.error?.message ?? t("common.aborted")}${res.pending?.now ? ` ${res.pending.now.text}` : ""}${s.blocked ? ` ${t("backup.decide")}` : ""}`, "error");
+    device.log?.(res.ok ? t("backup.sentLog") : t("backup.failedLog", { error: res.error?.message ?? t("backup.locked") }), res.ok ? "ok" : "error");
+    if (s.blocked) device.showDecision?.();
+  }
+
+  $("#cee-pattern-undo").addEventListener("click", async () => {
+    const s = device.session;
+    if (!s) return;
+    const release = s.reserve();
+    try {
+      await s.idle();
+      const res = await s.undo();
+      say(res.ok ? t("backup.undone") : t("backup.undoFailed", { error: res.error.message }), res.ok ? "ok" : "error");
+    } catch (e) {
+      say(t("backup.undoFailed", { error: e.message }), "error");
+    } finally {
+      release();
+      update();
+    }
+  });
+
+  return { update };
+}
+
+/** The emulator cannot start while a real device is connected: ask, disconnect, then switch the emulator on. */
+async function startAfterDisconnect(device, emulator) {
+  if (!device.session) return;
+  const yes = await window.ui?.confirm({ title: t("app.disconnect.title"), text: t("app.disconnect.text"), confirmLabel: t("app.disconnect.confirm") });
+  if (!yes || !device.session) return;
+  await device.disconnect();
+  try { toast(await emulator().powerOn(), "info"); } catch (e) { toast(e.message, "error", { help: "h:emulator:fix" }); }
+}
+
+/** Pages that share one navbar title: a switch goes between the emulator and the real device. */
+const MODES = { emu: true, device: true };
+
+/** Navbar: the title of the open page, and whether a device is connected, as words. */
+function navbar({ onMode }) {
+  let page = "start";
+  let connectButton = null;
+  let device = false;
+  let emuAction = null;
+  let cardButton = null;
+  let cardStatus = null;
+  let consoleAction = null;
+  let pluginActions = [];
+  let baukastenActions = [];
+  const trails = {};
+  const homes = {};
+  // One switch: off is the emulator, on the real device. onMode answers false when the device cannot be chosen.
+  const modeSwitch = $("#cee-mode-switch");
+  const menu = gearMenu($("#cee-emu-gear"), $("#cee-emu-menu"));
+  modeSwitch.addEventListener("change", () => {
+    if (onMode(modeSwitch.checked ? "device" : "emu") === false) modeSwitch.checked = page === "device";
+    else menu.close(true);
+  });
+  function render() {
+    const mode = page in MODES;
+    $("#cee-nav-title").hidden = mode;
+    $("#cee-mode").hidden = !mode;
+    $("#cee-emu-menu-box").hidden = !mode;
+    if (mode) {
+      modeSwitch.checked = page === "device";
+      const title = $("#cee-mode-title");
+      title.dataset.i18n = page === "device" ? "mode.device" : "mode.emu";
+      title.textContent = t(title.dataset.i18n);
+    } else {
+      // A page with sub-pages shows where you are as a breadcrumb: Plugins › Dokumentation › the section you read.
+      // Every crumb but the last leads back: the title to the page's start sub-page, a step with `go` to that step.
+      const parts = trails[page] ?? [];
+      const tab = $(`#cee-tab-${page}`);
+      // The label only: a badge on the tab (the "!" of a new release) is no part of the page's name.
+      const name = tab?.querySelector("[data-i18n]")?.textContent ?? tab?.textContent ?? "";
+      const title = parts.length && tab ? el("button", { type: "button", className: "cee-crumb-link", textContent: name, onclick: () => (homes[page] ?? (() => tab.click()))() }) : name;
+      $("#cee-nav-title").replaceChildren(title, ...parts.map((t, i) => {
+        const text = typeof t === "string" ? t : t.text;
+        return t.go && i < parts.length - 1
+          ? el("span", { className: "cee-crumb" }, el("button", { type: "button", className: "cee-crumb-link", textContent: text, onclick: t.go }))
+          : el("span", { className: "cee-crumb", textContent: text });
+      }));
+    }
+    // On the device page the navbar carries the device panel's button (it moves there from the page, so its handlers
+    // stay): connect while no device is attached, disconnect with the words "Gerät verbunden" once one is.
+    const link = connectButton ? [connectButton] : [];
+    // The emulator's card, its folder and its own window are rows of the gear menu, under the mode switch.
+    $("#cee-emu-rows").replaceChildren(...(page === "emu" ? [cardButton, emuAction].filter(Boolean) : []));
+    // The card's state line (for screen readers) stays in the bar: a live region in the shut menu would say nothing.
+    cardStatus ??= cardButton?.querySelector("#cee-sd-status") ?? null;
+    const state = page === "emu" ? [cardStatus].filter(Boolean) : page === "console" ? [consoleAction].filter(Boolean) : page === "scripts" ? pluginActions : page === "baukasten" ? baukastenActions : page !== "device" ? [] : device ? [el("span", { className: "cee-nav-fact", textContent: t("app.connected") }), ...link] : link;
+    $("#cee-nav-state").replaceChildren(...state);
+  }
+  return {
+    page(id) { page = id; render(); },
+    device(on) { device = on; render(); },
+    /** The device panel's connect and disconnect button. */
+    connect(node) { connectButton = node; render(); },
+    /** A control the emulator page puts into the navbar (the button for its own window). */
+    emu(node) { emuAction = node; render(); },
+    /** The emulator's SD card: its switch and the button that opens its folder. */
+    card(node) { cardButton = node; render(); },
+    /** The console's switch that lets scripts go on to the real device. */
+    console(node) { consoleAction = node; render(); },
+    /** Öffnen and Speichern of the plugin editor while it is open. */
+    plugins(nodes) { pluginActions = nodes; render(); },
+    /** Exportieren of the Baukasten while its export page is open. */
+    baukasten(nodes) { baukastenActions = nodes; render(); },
+    /** The breadcrumb after the title of `id`: the sub-page and, in the docs, the section. `home` opens the start sub-page. */
+    trail(id, parts, home) { trails[id] = parts; if (home) homes[id] = home; if (id === page) render(); },
+  };
+}
+
+/**
+ * The gear next to the mode title: a panel with the mode switch, the SD card, its folder and the emulator's own window.
+ * A disclosure, not role=menu, since its rows are switches and buttons; Escape and a click outside close it, and a
+ * button row closes it after it ran.
+ */
+function gearMenu(button, panel) {
+  button.append(icon("settings"));
+  const close = (refocus = false) => {
+    if (panel.hidden) return;
+    panel.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+    if (refocus) button.focus({ preventScroll: true });
+  };
+  button.addEventListener("click", () => {
+    if (!panel.hidden) { close(); return; }
+    panel.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    panel.querySelector("input, button:not([hidden])")?.focus({ preventScroll: true });
+  });
+  panel.addEventListener("keydown", e => { if (e.key === "Escape") { e.preventDefault(); close(true); } });
+  panel.addEventListener("click", e => { if (e.target.closest("button")) close(); });
+  document.addEventListener("pointerdown", e => { if (!panel.hidden && !panel.contains(e.target) && !button.contains(e.target)) close(); });
+  return { close };
+}
+
+/** The emulator's SD card in the navbar: the switch that puts it in and the button that shows its folder. */
+function cardBar(nav) {
+  const bar = el("div", { className: "cee-sd-bar", id: "cee-emu-card" });
+  nav.card(bar);
+  return bar;
+}
+
+/** Below 60rem the sidebar is a drawer behind the menu button. */
+function sidebarDrawer() {
+  const side = $("#cee-sidebar");
+  const button = $("#cee-menu");
+  const set = open => {
+    side.toggleAttribute("data-open", open);
+    button.setAttribute("aria-expanded", String(open));
+    // The drawer stands before the page in the tab order, so the focus has to go in.
+    if (open) (side.querySelector("[role=tab][aria-selected=true]") ?? side.querySelector("a, button"))?.focus();
+  };
+  button.addEventListener("click", () => set(!side.hasAttribute("data-open")));
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && side.hasAttribute("data-open")) { set(false); button.focus({ preventScroll: true }); }
+  });
+  // The drawer covers the menu button; a tap on the page beside it closes it.
+  document.addEventListener("pointerdown", e => {
+    if (side.hasAttribute("data-open") && !side.contains(e.target) && !button.contains(e.target)) set(false);
+  });
+  return { close: () => set(false) };
+}
+
+/** The sidebar folds away on wide screens; the choice is kept in this browser. */
+function sidebarFold() {
+  const app = $(".cee-app");
+  const button = $("#cee-collapse");
+  const set = fold => {
+    app.toggleAttribute("data-collapsed", fold);
+    button.setAttribute("aria-expanded", String(!fold));
+    try { localStorage.setItem("cee.fold", fold ? "1" : "0"); } catch {}
+  };
+  try { if (localStorage.getItem("cee.fold") === "1") set(true); } catch {}
+  button.addEventListener("click", () => set(!app.hasAttribute("data-collapsed")));
+}
+
+/**
+ * A plain download link (the Doom files) does nothing in the app window and says nothing in the browser: it goes
+ * through saveFile like every other download, with its toast.
+ */
+function fileLinks() {
+  document.addEventListener("click", async e => {
+    const a = e.target.closest?.("a[download][href]");
+    if (!a || a.href.startsWith("blob:")) return;
+    e.preventDefault();
+    if (a.getAttribute("aria-busy") === "true") return;
+    a.setAttribute("aria-busy", "true");
+    toast(t("app.downloading", { file: a.download }), "info");
+    try {
+      const res = await fetch(a.href);
+      if (!res.ok) throw new Error(`${res.status}`);
+      saveFile(new Uint8Array(await res.arrayBuffer()), a.download);
+    } catch (err) {
+      toast(t("app.downloadFailed", { file: a.download, error: err.message }), "error");
+    } finally {
+      a.removeAttribute("aria-busy");
+    }
+  });
+}
+
+function boot() {
+  applySettings();
+  fileLinks();
+  const changelog = changelogPage($("#cee-changelog"), $("#cee-tab-changelog"));
+  const discord = discordPage($("#cee-discord"));
+  settingsButton($("#cee-settings-button"), () => { areas?.select("settings"); drawer.close(); });
+  $("#cee-donate").addEventListener("click", () => drawer.close());
+  const emu = takeLink();
+  let areas = null;
+  // Picking the mode that is open already changes nothing; ui.tabs would show the empty device panel instead of the drawing.
+  // The mode picked in the navbar menu, kept across starts: only "Echtes Gerät" connects to a plugged-in Electribe by
+  // itself, with "Emulator" the device on the cable is left alone.
+  let mode = "emu";
+  try { if (localStorage.getItem("cee.mode") === "device") mode = "device"; } catch { /* blocked: the emulator stays the mode */ }
+  const pickMode = id => {
+    mode = id;
+    try { localStorage.setItem("cee.mode", id); } catch { /* blocked: the choice holds until the page closes */ }
+    if (id === "device") device.chosen();
+  };
+  const nav = navbar({
+    onMode: id => {
+      // Nothing on the cable: stay on the emulator. "unknown" (MIDI not granted yet) passes, the connect button asks for it.
+      if (id === "device" && usb.state === "absent") { toast(t("mode.none"), "info"); return false; }
+      pickMode(id);
+      if (id !== areas?.current) areas?.select(id, { focus: false });
+    },
+  });
+  const drawer = sidebarDrawer();
+  const transport = createMidiTransport(window);
+  const usb = createUsbWatch({ transport, permissions: navigator.permissions, hidden: () => document.hidden });
+  usbIndicator($("#cee-nav-end"), usb);
+  languageSwitch($("#cee-nav-end"));
+  // The gear of the emulator sits in the right corner, after the language menu.
+  $("#cee-nav-end").append($("#cee-emu-menu-box"));
+  // The navbar wraps on narrow screens, so anchors and scrollIntoView keep clear of its real height (app.css).
+  const navBox = $(".cee-navbar");
+  new ResizeObserver(() => document.documentElement.style.setProperty("--cee-navbar-real", `${navBox.offsetHeight}px`)).observe(navBox);
+  settingsPage($("#cee-settings"), window.__GELUMPE_APP, { transport, permissions: navigator.permissions, usb });
+  usb.start();
+  sidebarFold();
+  const options = subnav();
+  let fx = null;
+  let patterns = null;
+  let ptools = null;
+  let emulator = null;
+  let follow = null;
+  let popout = null;
+  let terminal = null;
+  let sd = null;
+  let sampleset = null;
+  let doom = null;
+  // One session on the emulator's port, shared by the effect editor's probe and the terminal's rehearsal.
+  const probe = sharedProbe(() => emulator?.port, () => emulator?.lack("sysex") ?? null);
+  let restrictNow = () => {};
+  const device = devicePanel($("#cee-device"), {
+    onSession: () => { sampleset?.sessionChanged(); doom?.sessionChanged(); restrictNow(); fx?.sessionChanged(); patterns?.update(); ptools?.sessionChanged(); terminal?.update(); usb.setConnected(!!device?.session && !device.session.sender.disconnected && device.session.port !== emulator?.port); },
+    emulator: () => emulator?.port,
+    view: () => emulator,
+    probe,
+    usb,
+    auto: () => mode === "device" && setting("autoConnect"),
+    diagnose: () => { areas?.select("settings"); $("#cee-midi")?.scrollIntoView({ block: "start" }); $("#cee-midi-rescan")?.focus({ preventScroll: true }); },
+    onLink: on => nav.device(on),
+    autoOff: holdAutoConnect,
+    autoOn: releaseAutoConnect,
+  });
+  nav.connect(device.button);
+  // "Echtes Gerät" shows the emulator's Electribe drawing; the connection controls sit above it in that mode only.
+  $("#cee-emu").before($("#cee-device"));
+  $("#cee-device").hidden = true;
+  patterns = patternDevice(device);
+  ptools = patternToolsPage($("#cee-ptools"), { device });
+  // The device page is one of the two modes of the emulator entry, so its own tab stays out of the list.
+  // Pattern-Werkzeuge and Samples are built but not offered (docs/entscheidungen.md). Without ?labs their tabs
+  // leave the list before ui.tabs reads it, so neither the navigation nor #ptools / #samples reaches them.
+  if (!new URLSearchParams(location.search).has("labs")) for (const tab of document.querySelectorAll("#cee-areas [data-labs]")) tab.remove();
+  const listed = () => areas.ids.filter(id => !$(`#cee-tab-${id}`).hidden && $(`#cee-tab-${id}`).getAttribute("aria-disabled") !== "true");
+  /** Korgs plain build or the synth's in the emulator and no real device: Presets and Modulationen stay shut, visibly. */
+  let plainStock = false;
+  let plainWhy = t("app.shut.stock");
+  const restrict = () => {
+    const none = !emulator?.firmware;
+    const shut = (plainStock || none) && !device.session;
+    for (const id of NEEDS_TABLES) {
+      const tab = $(`#cee-tab-${id}`);
+      tab.setAttribute("aria-disabled", String(shut));
+      if (shut) tab.title = none ? t("app.shut.none") : plainWhy;
+      else tab.removeAttribute("title");
+    }
+    if (shut && NEEDS_TABLES.includes(areas?.current)) areas.select("emu", { focus: false });
+  };
+  const shown = id => (id === "device" ? "emu" : id);
+  areas = window.ui?.tabs ? window.ui.tabs($("#cee-areas"), {
+    persist: "cee.area",
+    onChange: id => {
+      // all pages scroll the window: without this the next page opens where the last one was scrolled to
+      window.scrollTo({ top: 0, behavior: "instant" });
+      nav.page(id);
+      options.page(id);
+      $("#cee-settings-button").toggleAttribute("aria-current", id === "settings");
+      $("#cee-donate").toggleAttribute("aria-current", id === "support");
+      $("#cee-tab-emu").toggleAttribute("data-active", id === "device");
+      $("#cee-device").hidden = id !== "device";
+      if (id === "device") { $("#cee-area-emu").hidden = false; $("#cee-area-device").hidden = true; }
+      popout?.realDevice(id === "device");
+      if (id === "console") terminal?.update();
+      if (id === "changelog") changelog.opened();
+      if (id === "discord") discord.opened();
+    },
+  }) : null;
+  $("#cee-areas").addEventListener("click", e => { if (e.target.closest("[role=tab]")) drawer.close(); });
+  if (areas) {
+    nav.page(areas.current);
+    options.page(areas.current);
+    if (areas.current === "discord") discord.opened();
+    $("#cee-tab-emu").toggleAttribute("data-active", areas.current === "device");
+    $("#cee-device").hidden = areas.current !== "device";
+    if (areas.current === "device") { $("#cee-area-emu").hidden = false; $("#cee-area-device").hidden = true; }
+  }
+  // The tab list stands vertically and skips the hidden tab; ui.tabs would walk into it.
+  $("#cee-areas").addEventListener("keydown", e => {
+    const keys = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1, Home: "first", End: "last" };
+    if (!areas || !(e.key in keys) || !e.target.closest("[role=tab]") || e.altKey || e.ctrlKey || e.metaKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const ids = listed();
+    const at = ids.indexOf(shown(areas.current));
+    const to = keys[e.key] === "first" ? 0 : keys[e.key] === "last" ? ids.length - 1 : (at + keys[e.key] + ids.length) % ids.length;
+    areas.select(ids[to], { focus: true });
+  }, true);
+  restrictNow = restrict;
+  window.addEventListener("cee:pattern-loaded", () => patterns.update());
+  let storage = null;
+  try { storage = window.localStorage; } catch { /* blocked: the scripts and the follow switch stay in memory */ }
+  follow = followDevice({ device, emulator: () => emulator, probe, fx: () => fx, storage });
+  fx = fxPanel($("#cee-fx"), {
+    device, embedded: true,
+    onSent: sent => follow?.redraw(sent),
+    pickerExtra: follow.node,
+    idle: t("app.fxIdle"),
+    live: async () => (emulator?.port.running ? probe() : null),
+    emulator: () => emulator,
+  });
+  levelsPanel($("#cee-levels"), {
+    session: async () => device.session ?? (emulator?.port.running ? probe() : null),
+    presets: () => fx.presets(),
+    openPreset: slot => { if (fx.open("ifx", slot)) $("#cee-fx").scrollIntoView?.({ block: "start" }); },
+    device,
+  });
+  emulator = emulatorPanel($("#cee-emu"), emu.link, { deviceArea: device, onConnect: next => sd?.connect(next), onBlocked: () => startAfterDisconnect(device, () => emulator), onFirmware: () => device.firmwareChanged() });
+  const modulations = modulationsPage($("#cee-mod"), { emulator });
+  const baukasten = baukastenPage($("#cee-baukasten"), { presets: fx, sub: options, trail: (parts, home) => nav.trail("baukasten", parts, home), navbar: nodes => nav.baukasten(nodes) });
+  samplesPage($("#cee-samples"), { device, emulator, probe });
+  sampleset = samplesFilePage($("#cee-sampleset"), { device });
+  doom = doomPage($("#cee-doom-files"), { device });
+  let fxFirmware = null;
+  let modFirmware = null;
+  let plainFor = null;
+  let fxRunning = false;
+  let noFirmware = null;
+  setInterval(() => {
+    const running = !!emulator.port.running;
+    if (running !== fxRunning) { fxRunning = running; if (running) setTimeout(() => fx.refresh(), 3000); }
+    if (emulator.firmware && emulator.firmware !== fxFirmware) {
+      fxFirmware = emulator.firmware;
+      fx.loadBytes(fxFirmware).catch(() => {});
+      terminal?.update();
+    }
+    if (emulator.firmware && emulator.firmware !== plainFor) {
+      const bytes = plainFor = emulator.firmware;
+      // the synth has none of Hacktribe's tables, with or without patches
+      (emulator.build === "stock" ? hasBlech(bytes).then(yes => !yes) : Promise.resolve(emulator.build === "synth")).then(plain => {
+        if (plainFor !== bytes) return;
+        plainStock = plain;
+        plainWhy = emulator.build === "synth" ? t("app.shut.synth") : t("app.shut.stock");
+        restrict();
+      });
+    }
+    if (emulator.firmware && emulator.firmware !== modFirmware) { modFirmware = emulator.firmware; modulations.loadBytes(modFirmware).catch(() => {}); }
+    baukasten.update();
+    if (!emulator.firmware !== noFirmware) { noFirmware = !emulator.firmware; restrict(); }
+  }, 1000);
+  // Shut from the first frame, not a second later: before that a click still opened a page without its tables.
+  noFirmware = !emulator.firmware;
+  restrict();
+  sd = sdcardPanel(cardBar(nav), emulator, { bar: true });
+  popout = emulatorWindow(emulator, { place: node => nav.emu(node) });
+  popout.realDevice(areas?.current === "device");
+  // The folder the patcher named for its last copy, for the Rettung page; it lasts until the app closes.
+  let target = null;
+  // The patcher's last red test, for Blechy; it lasts until the app closes, a passed test clears it.
+  let tested = null;
+  patcherPage($("#cee-patcher"), { emulator, show: id => areas?.select(id), session: () => device.session ?? null, onTarget: folder => { target = folder; }, onTest: failure => { tested = failure; } });
+  // A session on the emulator's port is no Electribe, so the Rettung page only asks one on a cable.
+  const cabled = () => (device.session && device.session.port !== emulator?.port && !device.session.sender.disconnected ? device.session : null);
+  rescuePage($("#cee-rescue"), {
+    hardware: () => cabled()?.hardware?.() ?? null,
+    firmware: () => (cabled()?.device?.blech ? "blech" : null),
+    target: () => target,
+    test: () => tested,
+    read: {
+      midi: async () => midiVerdict(await collectMidi({ transport, permissions: navigator.permissions, usb: usb.state, app: window.__GELUMPE_APP, agent: navigator.userAgent }), mode),
+      version: () => checkVerdict(window.__GELUMPE_APP?.version),
+    },
+  });
+  supportPage({ avatar: $("#cee-support-avatar"), wallpaper: $("#cee-support-wallpaper") });
+  featuresPage($("#cee-features"));
+  splashPage($("#cee-splash"));
+  // A run from the console opens the Plugins page, where the run area shows it.
+  const scripts = scriptsPanel($("#cee-scripts"), { storage, sub: options, session: () => device.session ?? null, onRun: () => areas?.select("scripts", { focus: false }), trail: (parts, home) => nav.trail("scripts", parts, home), navbar: nodes => nav.plugins(nodes) });
+  // The console always talks to the emulator; this switch in the navbar lets a script go on to a connected Electribe.
+  const forward = el("input", { type: "checkbox", role: "switch", id: "cee-term-forward" });
+  nav.console(el("label", { className: "ui-switch cee-term-forward" }, [forward, el("span", { className: "ui-switch-track", ariaHidden: "true" }), t("app.forward")]));
+  terminal = terminalPanel($("#cee-terminal"), {
+    terminal: new Terminal({ device, emulator, probe, forward: () => forward.checked }),
+    device, scripts, forward,
+    lack: () => emulator.lack("sysex"),
+    power: () => emulator.powerOn(),
+  });
+  // The app always starts with the link in its address and opens on the start page; a link opened in the browser goes to the emulator.
+  if (emu.fresh) areas?.select(window.__GELUMPE_APP ? "start" : "emu");
+  else findLink(emu).then(found => {
+    if (!found.fresh) return;
+    emulator.connect(found.link);
+    sd.connect(found.link);
+    areas?.select("emu");
+  });
+
+  dropzoneClear($("#cee-file"), () => { $("#cee-error").hidden = true; });
+  $("#cee-file").addEventListener("change", e => {
+    $("#cee-error").hidden = true;
+    const f = e.target.files?.[0];
+    if (f) load(f);
+  });
+  $("#cee-reload").addEventListener("change", e => {
+    const f = e.target.files?.[0];
+    if (f) load(f);
+    e.target.value = "";
+  });
+  $("#cee-save").addEventListener("click", save);
+  $("#cee-undo").addEventListener("click", () => doc.undo());
+  document.addEventListener("keydown", e => {
+    const inPatterns = !$("#cee-area-patterns").hidden;
+    const typing = e.target.closest("input:not([type=range]):not([type=checkbox]):not([type=radio]), textarea, select");
+    if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey && inPatterns && !typing) {
+      e.preventDefault();
+      doc.undo();
+    }
+  });
+  updateActions();
+  document.documentElement.dataset.ceeReady = "1";
+}
+
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot, { once: true });
+else boot();
+
+watchForUpdate($("#cee-update"), undefined, toastFor("h:updates"));
+showNews(toast);
+
+// In the desktop app a new window goes nowhere: the donate, GitHub, Instagram and Korg links navigate in place and the app opens them in the browser (src-tauri).
+if (window.__GELUMPE_APP) for (const link of document.querySelectorAll("a[href^='https://www.paypal.me/'], a[href^='https://www.korg.com/'], a[href^='https://github.com/'], a[href^='https://www.instagram.com/']")) link.target = "_self";

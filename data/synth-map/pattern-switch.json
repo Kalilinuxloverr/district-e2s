@@ -1,0 +1,280 @@
+{
+ "entries": [
+  {
+   "from": "0xC00431F0",
+   "to": "0xC003D6EC",
+   "kind": "code",
+   "why": "pattern selection singleton getter: same shape (alloc, ctor, cached pointer); the ctor 0xC00726C0 twins the Sampler's 0xC008179C (struct 0x34C instead of 0x350, +0x308 field loop equal); the main screen's VALUE and MENU handlers call it right before reading +0x341 in both builds (0xC005B5E4, 0xC005B614)"
+  },
+  {
+   "from": "0xC006513C",
+   "to": "0xC005B604",
+   "kind": "code",
+   "why": "tail call of the main screen's VALUE handler into the selector (pop {r4,r5,r6,lr}; b selector), after the same wheel-step times ten code (mul r1,r4,#10) as 0xC00650F8..0xC006513C in the Sampler"
+  },
+  {
+   "from": "0xC008206C",
+   "to": "0xC0072A64",
+   "kind": "code",
+   "why": "the selector: the synth inlined the wrap (ldr 0x318; adds; addmi #0xfa; cmp #0xf9; subgt #0xfa) and tail calls set_number 0xC0072948 with r2=1; the only branch to it is the wheel hook site above. Arguments as in the Sampler: r0 = psel, r1 = steps. The synth has no wrap function, the patch carries its own"
+  },
+  {
+   "from": "0xC006EDE4",
+   "to": "0xC00627FC",
+   "kind": "code",
+   "why": "pad selection: push {r4,lr}; mov r4,r1; bl psel; mov r1,r4; mov r2,#1; pop {r4,lr}; b set_number stub (0xC0072A84 = the Sampler's 0xC008209C), instruction for instruction"
+  },
+  {
+   "from": "0xC006EDE8",
+   "to": "0xC0062800",
+   "kind": "code",
+   "why": "second instruction of the pad selection, where the hook continues"
+  },
+  {
+   "from": "0xC006EE00",
+   "to": "0xC0062818",
+   "kind": "code",
+   "why": "MIDI program change handler: push {r3,r4,r5,lr}; mov r5,r1; mov r4,r2; bl psel; ...; b the set_number copy without MIDI (0xC0072858, the Sampler's 0xC0081E60), instruction for instruction"
+  },
+  {
+   "from": "0xC006EE04",
+   "to": "0xC006281C",
+   "kind": "code",
+   "why": "second instruction of the program change handler, where the hook continues"
+  },
+  {
+   "from": "0xC0065144",
+   "to": "0xC005B60C",
+   "kind": "code",
+   "why": "MENU handler of the main screen: push {r4,lr}; psel; ldrb 0x341; cmp; popne. It is slot 6 of the class table at 0xC00C9C30 (value read there). The Sampler's also has a transport state check (0xB) that the synth's lacks; the patch does not depend on it"
+  },
+  {
+   "from": "0xC005F1C4",
+   "to": "0xC0055C84",
+   "kind": "code",
+   "why": "the call that fetches the number to start at the sequence end: bl PLAYER; mov r4,r0; bl psel; bl getter; mov r2,#0; mov r1,r0; mov r0,r4; bl change (0xC006C434, the Sampler's 0xC0079AA8), then PLAYER +0x320 test, all equal in shape"
+  },
+  {
+   "from": "0xC00818D8",
+   "to": "0xC0072330",
+   "kind": "code",
+   "why": "the number fetch: ldr r0,[r0,#0x318]; bx lr, same two instructions"
+  },
+  {
+   "from": "0xC0086DC4",
+   "to": "0xC0076E5C",
+   "kind": "code",
+   "why": "the load of the NEXT: pointer in the lower line builder. The builder's entry differs (synth push {r0-r6,lr}, Sampler push {r4,r5,lr}; sub sp), the body is the same: ldr r1 pool; mov r5,#1; add r2,sp,#0xc; strb r5,[r0,#0x5c]; strb r5,[r0,#0x14]; mov r4,r0; add r0,sp,#4; bl; bl psel; bl getter; mov r3,r5; mov r2,#3; add r1,r0,r5. r0 must survive, r1 is loaded, r2 and r3 are set after, in both"
+  },
+  {
+   "from": "0xC00A72E0",
+   "to": "0xC0091F7A",
+   "kind": "data",
+   "why": "the string NEXT: in the text pool, between ScaleMode: and MFX:%s in both builds; the literal pool word of the load above (0xC0076F60) holds this address"
+  },
+  {
+   "from": "0xC03405BC",
+   "to": "0xC0340774",
+   "kind": "ram",
+   "why": "the transport singleton pointer: the literal pool word of the synth's transport getter 0xC002DBC8 (the Sampler's 0xC0030D28 loads 0xC03405BC), the same getter shape; set_number reads +0x308 of its result in both"
+  },
+  {
+   "from": "0xC08B2940",
+   "to": "0xC0783D00",
+   "kind": "ram",
+   "why": "the pattern bank in RAM: booted synth in the emulator, scan for the pattern signature PTST gives 250 blocks at a 0x4000 stride from 0xC0783D00 (plus the two live copies), block layout as the Sampler's (name at +0x14, tempo at +38, length byte at +41, the chain fields at 0x3B00 are read by the UI code at 0xC007D88C and 0xC007E43C like the Sampler's 0xC008F30C and 0xC008FC30)"
+  },
+  {
+   "from": "0xC08A2940",
+   "to": "0xC0773D00",
+   "kind": "ram",
+   "why": "the bank's global block copy (GLST) 0x10000 before the pattern bank in both builds; found by the same scan of the booted synth"
+  },
+  {
+   "from": "0xC06A2A94",
+   "to": "0xC0573E54",
+   "kind": "ram",
+   "why": "the live global block (GLST), found by the same scan of the booted synth; the distance to the bank's copy (0x1FFEAC) equals the Sampler's"
+  },
+  {
+   "from": "0xC0081E18",
+   "to": "0xC0072810",
+   "kind": "code",
+   "why": "the stopped sync of the pattern selection (stopped, chosen not running: load the chosen one): the same 18 instructions as the Sampler's, calling the twins of the transport getter 0xC002DBC8 and the player getter 0xC002C9E8, offsets 0x308, 0x318, 0x340 equal; it sits 0x138 before set_number in both builds"
+  },
+  {
+   "from": "0xC0081E1C",
+   "to": "0xC0072814",
+   "kind": "code",
+   "why": "the second instruction of that function (the hook's way back)"
+  },
+  {
+   "from": "0xC0044874",
+   "to": "0xC003EB60",
+   "kind": "code",
+   "why": "pad handler 0xC0044874 found once in the synth at 0xC003EB60 (12 words equal with branch offsets masked: push {r0-r2,r4-r11,lr}, the four movs, bl to the busy getter 0xC002A798, cmp, beq, cmp r4, bne)"
+  },
+  {
+   "from": "0xC0044888",
+   "to": "0xC003EB74",
+   "kind": "code",
+   "why": "the pad handler's bl to the busy getter, +0x14 of the handler in both builds"
+  },
+  {
+   "from": "0xC004489C",
+   "to": "0xC003EB88",
+   "kind": "code",
+   "why": "the pad handler goes on with the pad: the beq target after the busy check, +0x28 in both builds"
+  },
+  {
+   "from": "0xC004499C",
+   "to": "0xC003EC88",
+   "kind": "code",
+   "why": "the pad handler's way out: the bne target of the busy check in both builds (bne +0xfc)"
+  },
+  {
+   "from": "0xC002D81C",
+   "to": "0xC002A980",
+   "kind": "code",
+   "why": "the command runner clears its busy byte (strb r3, [r6, #0x10]): the 8 words 0xC002D810 to 0xC002D82C found once in the synth at 0xC002A974, branch offsets masked"
+  },
+  {
+   "from": "0xC034057C",
+   "to": "0xC0340734",
+   "kind": "ram",
+   "why": "pointer to the command runner, its busy byte at +0x10: the busy getter 0xC002A798 (synth's twin of 0xC002D634) loads it from its literal"
+  },
+  {
+   "from": "0xC0079BE0",
+   "to": "0xC006C56C",
+   "kind": "code",
+   "why": "pattern load: pre-copy call; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC0079C2C",
+   "to": "0xC006C5B8",
+   "kind": "code",
+   "why": "pattern load: post-copy call; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC0079C30",
+   "to": "0xC006C5BC",
+   "kind": "code",
+   "why": "instruction after the post-copy call; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC0098C84",
+   "to": "0xC00860C8",
+   "kind": "code",
+   "why": "global voice reset in the post-copy initializer; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC0091F5C",
+   "to": "0xC007FFE0",
+   "kind": "code",
+   "why": "global voice reset entry; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC0098C70",
+   "to": "0xC00860B4",
+   "kind": "code",
+   "why": "per-part sample preparation in the post-copy initializer; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC009B5D8",
+   "to": "0xC00881C4",
+   "kind": "code",
+   "why": "branch target read from the matched pre-copy call; its single branch reaches 0xC00860EC, the matched pre-copy initializer"
+  },
+  {
+   "from": "0xC009B5DC",
+   "to": "0xC00881C8",
+   "kind": "code",
+   "why": "branch target read from the matched post-copy call; its single branch reaches 0xC008609C, the matched post-copy initializer"
+  },
+  {
+   "from": "0xC009AF20",
+   "to": "0xC0087B60",
+   "kind": "code",
+   "why": "part object getter: same bounds check, assertion and base plus index calculation; sampler stride 0x148, synth stride 0x110, read from both instructions"
+  },
+  {
+   "from": "0xC00998B4",
+   "to": "0xC0086C50",
+   "kind": "code",
+   "why": "voice sample assignment called by note initialization from part+0x34; stores the sample at voice+0x3A on sampler and +0x38 on synth, read in both functions"
+  },
+  {
+   "from": "0xC0079B90",
+   "to": "0xC006C51C",
+   "kind": "code",
+   "why": "pattern load before held-pad cleanup; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC0079BD4",
+   "to": "0xC006C560",
+   "kind": "code",
+   "why": "pattern load after held-pad cleanup and initial note-off flush; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC00413A8",
+   "to": "0xC003F60C",
+   "kind": "code",
+   "why": "getter called at the matched load site C006C51C: singleton allocation of 0x338 bytes, cached pointer, constructor and return, same shape in both builds"
+  },
+  {
+   "from": "0xC0045DAC",
+   "to": "0xC0040078",
+   "kind": "code",
+   "why": "held-note source cleanup entry; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC0045DB0",
+   "to": "0xC004007C",
+   "kind": "code",
+   "why": "second instruction of held-note source cleanup; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC005AA80",
+   "to": "0xC0051608",
+   "kind": "code",
+   "why": "note registry flush called at matched load site C006C55C and the three matched setters; both walk four-byte note entries, emit note-offs and clear the registry; synth inlines the vector copy"
+  },
+  {
+   "from": "0xC004A728",
+   "to": "0xC0044808",
+   "kind": "code",
+   "why": "note-off flush in the key setter; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC004A7A8",
+   "to": "0xC0044888",
+   "kind": "code",
+   "why": "note-off flush in the scale setter; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC00492F4",
+   "to": "0xC00434B4",
+   "kind": "code",
+   "why": "note-off flush in the voice-mode setter; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC005A884",
+   "to": "0xC005140C",
+   "kind": "code",
+   "why": "voice-mode note-slot reinitialization; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC005A7A4",
+   "to": "0xC005132C",
+   "kind": "code",
+   "why": "voice-mode note-slot reinitialization; fwmap, 16 masked words equal"
+  },
+  {
+   "from": "0xC0079B78",
+   "to": "0xC006C504",
+   "kind": "code",
+   "why": "pattern load entry, same prologue and argument moves before the matched held-pad cleanup getter at C006C51C"
+  }
+ ]
+}

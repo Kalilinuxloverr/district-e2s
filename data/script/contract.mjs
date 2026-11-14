@@ -1,0 +1,706 @@
+/**
+ * The script contract: the one source for everything the compiler, the
+ * verifier, the JS reference VM and the future ARM VM have to agree on.
+ * Nothing in here is code that runs a script; src/script/ reads this, and
+ * src/script/arm-tables.mjs turns it into the tables the ARM VM is built from.
+ *
+ * Value model: every value is a signed 32-bit integer. A string is the index
+ * of a 32-byte slot in the blob's string table (31 characters plus NUL), so
+ * the VM never copies, concatenates or measures text.
+ *
+ * Change rules: ids and numbers below are never reused or renumbered. New
+ * opcodes, events, errors and API entries are added at the end of their
+ * list, and a new API entry raises API_VERSION (its `since`). FORMAT_VERSION
+ * changes only when the blob layout or an opcode's meaning changes; a VM
+ * accepts exactly its own FORMAT_VERSION and any blob whose apiVersion is not
+ * newer than its own API_VERSION. A new value at the end of an event's list
+ * (EVENT_ARG_SINCE) raises it the same way. test/script-contract.test.mjs pins
+ * the numbers.
+ *
+ * Format 2 is the only format. Against the never-shipped format 1 it widens
+ * variable and array operands to 16 bits and moves the variable count to a
+ * 32-bit header field.
+ */
+import { text } from "../../src/text.mjs";
+
+export const FORMAT_VERSION = 2;
+export const API_VERSION = 27;
+
+/** "GSCR" in the first four bytes of every blob. */
+export const MAGIC = 0x52435347;
+
+export const LIMITS = Object.freeze({
+  stack: 32,
+  callDepth: 8,
+  vars: 65536,
+  arrayLength: 65535,
+  consts: 256,
+  strings: 64,
+  stringLength: 31,
+  stringSlot: 32,
+  code: 16384,
+  nameLength: 15,
+  apiArgs: 4,
+  sourceLines: 65535,
+  fuel: 20000,
+  timeCheckEvery: 256,
+});
+
+/** The shared arena holds blobs, variables and script entries. Scratch and the event ring are separate. */
+const SCRIPT_POOL_BYTES = 128 * 1024;
+export const BUDGET = Object.freeze({ frameMs: 5, handlerWarnMs: 0.5, ring: 64, scriptBytes: SCRIPT_POOL_BYTES, variableSlots: SCRIPT_POOL_BYTES / 4 });
+/** Timer3 counts at 150 MHz and the firmware runs it with a period of one second (PRD 0x8F0D17F), so it wraps there, not at 2^32. */
+export const TIMER3 = Object.freeze({ address: 0x01F0D010, hz: 150000000, period: 150000000 });
+
+/**
+ * Blob header, little endian, 52 bytes. Sections follow in this order:
+ * handlers (4 bytes each), consts (4 bytes each), strings (32 bytes each),
+ * code (padded to a multiple of 4), lines (4 bytes each).
+ * totalSize counts all of it; the checksum is CRC-32 (IEEE) over the bytes
+ * from offset 16 to totalSize.
+ */
+export const HEADER = Object.freeze({
+  size: 52,
+  checksumFrom: 16,
+  fields: Object.freeze([
+    { name: "magic", offset: 0, type: "u32" },
+    { name: "formatVersion", offset: 4, type: "u16" },
+    { name: "apiVersion", offset: 6, type: "u16" },
+    { name: "totalSize", offset: 8, type: "u32" },
+    { name: "checksum", offset: 12, type: "u32" },
+    { name: "varCount", offset: 16, type: "u32" },
+    { name: "entry", offset: 20, type: "u16" },
+    { name: "codeSize", offset: 22, type: "u16" },
+    { name: "stackMax", offset: 24, type: "u16" },
+    { name: "handlerCount", offset: 26, type: "u16" },
+    { name: "constCount", offset: 28, type: "u16" },
+    { name: "stringCount", offset: 30, type: "u16" },
+    { name: "lineCount", offset: 32, type: "u16" },
+    { name: "flags", offset: 34, type: "u16" },
+    { name: "name", offset: 36, type: "char16" },
+  ]),
+});
+
+/**
+ * Bits of the header's `flags`. PROBED: the editor probed this block and let it out. DATA: a data section follows the
+ * lines, up to totalSize: records of { base u16, count u16, count bytes, zeros up to a multiple of 4 }, each a run of
+ * array slots the loader sets to those bytes (0 to 255) after it cleared the variables; count is at least 1 and the run
+ * lies inside the variables. Any other bit is refused.
+ */
+export const BLOCK_FLAGS = Object.freeze({ PROBED: 1, DATA: 2, KNOWN: 3 });
+
+/** Section entry sizes in bytes. A handler entry is { event u8, argc u8, entry u16 }; a line entry { offset u16, line u16 }. */
+export const SECTION = Object.freeze({ handler: 4, constant: 4, string: 32, line: 4, dataRecord: 4 });
+
+const byte = (name, as = "byte") => ({ name, size: 1, as });
+const half = (name, as) => ({ name, size: 2, as });
+const word = (name, as = "target") => ({ name, size: 2, as });
+
+const OP_LIST = [
+  // name, number, operands, pop, push, cost, flow
+  ["HALT", 0, [], 0, 0, 1, "end"],
+  ["PUSHB", 1, [byte("value")], 0, 1, 1],
+  ["PUSHK", 2, [byte("index", "const")], 0, 1, 1],
+  ["PUSHS", 3, [byte("index", "string")], 0, 1, 1],
+  ["LOAD", 4, [half("slot", "var")], 0, 1, 1],
+  ["STORE", 5, [half("slot", "var")], 1, 0, 1],
+  ["ALOAD", 6, [half("base", "arrayBase"), half("length", "arrayLength")], 1, 1, 2],
+  ["ASTORE", 7, [half("base", "arrayBase"), half("length", "arrayLength")], 2, 0, 2],
+  ["DUP", 8, [], 1, 2, 1],
+  ["DROP", 9, [], 1, 0, 1],
+  ["ADD", 10, [], 2, 1, 1],
+  ["SUB", 11, [], 2, 1, 1],
+  ["MUL", 12, [], 2, 1, 2],
+  ["DIV", 13, [], 2, 1, 8],
+  ["MOD", 14, [], 2, 1, 8],
+  ["AND", 15, [], 2, 1, 1],
+  ["OR", 16, [], 2, 1, 1],
+  ["XOR", 17, [], 2, 1, 1],
+  ["SHL", 18, [], 2, 1, 1],
+  ["SHR", 19, [], 2, 1, 1],
+  ["NEG", 20, [], 1, 1, 1],
+  ["NOT", 21, [], 1, 1, 1],
+  ["EQ", 22, [], 2, 1, 1],
+  ["NE", 23, [], 2, 1, 1],
+  ["LT", 24, [], 2, 1, 1],
+  ["LE", 25, [], 2, 1, 1],
+  ["GT", 26, [], 2, 1, 1],
+  ["GE", 27, [], 2, 1, 1],
+  ["JMP", 28, [word("target")], 0, 0, 1, "jump"],
+  ["JZ", 29, [word("target")], 1, 0, 1, "branch"],
+  ["JNZ", 30, [word("target")], 1, 0, 1, "branch"],
+  ["CALL", 31, [word("target"), byte("argc", "argc")], "argc", 1, 3, "call"],
+  ["RET", 32, [], 1, 0, 2, "end"],
+  ["CALLAPI", 33, [byte("id", "api"), byte("argc", "argc")], "argc", 1, 4],
+];
+
+/**
+ * Opcode table. `pop` is a count or "argc" (taken from the operand of that
+ * name), `push` a count. `cost` is in fuel units, an estimate until the VM
+ * runs on the device (plan, phase 1.4); CALLAPI adds the API entry's cost.
+ * The unit costs below are unchanged by the 16-bit variable operands; what
+ * they cost the ARM interpreter is in docs/plugins.md ("Kosten von Format 2").
+ * `flow`: next, jump, branch (jump or fall through), call (returns to the
+ * next instruction), end (no successor). An operand's `as` says what it
+ * indexes: byte (a plain unsigned value), const, string, var, arrayBase and
+ * arrayLength (a slot range in the variable area; 16 bits each, so a variable
+ * area holds up to 65536 slots and an array up to 65535), target (a code offset), argc, api (an API id). RET hands the value
+ * on top to the caller, which sees it as the push of its CALL; with no
+ * caller it ends the run, like HALT.
+ */
+export const OPCODES = Object.freeze(OP_LIST.map(([name, code, operands, pop, push, cost, flow = "next"]) =>
+  Object.freeze({ name, code, operands: Object.freeze(operands), size: 1 + operands.reduce((n, o) => n + o.size, 0), pop, push, cost, flow })));
+
+export const OP = Object.freeze(Object.fromEntries(OPCODES.map(o => [o.name, o.code])));
+export const OPCODE_COUNT = OPCODES.length;
+/** Opcode numbers are a dense 0 to OPCODE_COUNT - 1; everything above is invalid. */
+export const OPCODE_BY_CODE = Object.freeze(OPCODES.slice());
+export const OPCODE_BY_NAME = new Map(OPCODES.map(o => [o.name, o]));
+
+const EVENT_LIST = [
+  // name, args
+  ["start", []],
+  ["ready", []],
+  ["frame", []],
+  ["buttonPress", ["key"]],
+  ["buttonRelease", ["key"]],
+  ["knob", ["index", "value"]],
+  ["encoder", ["index", "delta"]],
+  ["pad", ["index", "down", "velocity"]],
+  ["touch", ["x", "y", "first"]],
+  ["step", ["step"]],
+  ["beat", []],
+  ["play", []],
+  ["stop", []],
+  ["rec", []],
+  ["patternChange", ["index"]],
+  ["partChange", ["part"]],
+  ["mute", ["part", "muted"]],
+  ["tempo", ["tenthsBpm"]],
+  ["save", []],
+  ["menu", ["id", "value"]],
+  ["open", []],
+  ["close", []],
+  ["timer", ["callback"]],
+];
+
+/**
+ * The API version in which an event value was added at the end of the event's list, for the values newer than the
+ * event itself. A handler that takes such a value needs a block of at least that version; the compiler sets it.
+ */
+export const EVENT_ARG_SINCE = Object.freeze({ touch: Object.freeze({ first: 6 }) });
+
+/**
+ * Events. `start` is the script body itself (top-level statements), not a
+ * handler. `ready`, `frame` and the queued events run in the UiTask in the
+ * frame hook; `save` runs in the CommandTask.
+ */
+export const EVENTS = Object.freeze(EVENT_LIST.map(([name, args], id) =>
+  Object.freeze({ id, name, args: Object.freeze(args), argc: args.length })));
+export const EVENT_BY_NAME = new Map(EVENTS.map(e => [e.name, e]));
+export const EVENT_BY_ID = new Map(EVENTS.map(e => [e.id, e]));
+/**
+ * The events of an app (korg.app): `open` when the user opens it from the BLECH menu, `close` when it ends. They go to that
+ * one script only, are no input and nothing outside the runtime posts them.
+ */
+export const APP_EVENTS = Object.freeze(["open", "close"]);
+/** Events a script may post from outside the VM: everything the frame hook feeds from the ring, except the app events. */
+/**
+ * Events only the runtime posts and no plugin registers a handler for: `timer` goes to the one script whose korg.after,
+ * korg.every or korg.afterSteps is due, with the callback number the compiler gave the function; the compiler builds the
+ * handler that calls it.
+ */
+export const INTERNAL_EVENTS = Object.freeze(["timer"]);
+/** Events a script may post from outside the VM: everything the frame hook feeds from the ring, except the app and internal events. */
+export const QUEUED_EVENTS = Object.freeze(EVENTS.filter(e => e.id >= 3 && !APP_EVENTS.includes(e.name) && !INTERNAL_EVENTS.includes(e.name)).map(e => e.name));
+
+/** Word-aligned per-script metadata; maxima arrays have one word per event. */
+/** Persistent values of one script: 16 integer slots and a mask of the slots that hold a saved value. */
+export const STORE = Object.freeze({
+  slots: 16,
+  nameBytes: 16,
+  recordSize: 84,
+  headerSize: 16,
+  magic: 0x54535347,
+  version: 1,
+  files: Object.freeze(["store.a.bin", "store.b.bin"]),
+  minPauseFrames: 50,
+  fields: Object.freeze([
+    { name: "magic", offset: 0, type: "u32" },
+    { name: "version", offset: 4, type: "u16" },
+    { name: "count", offset: 6, type: "u16" },
+    { name: "generation", offset: 8, type: "u32" },
+    { name: "checksum", offset: 12, type: "u32" },
+  ]),
+});
+
+/**
+ * The timers of one script (korg.after, korg.every, korg.afterSteps), `slots` records of `recordSize` bytes in its script
+ * entry. A record: `due` (the millisecond count of the runtime clock it is due at, or the steps still to come), `period` (the
+ * milliseconds of korg.every, 0 once), `callback` (u8, the number the compiler gave the function), `kind` (u8, KIND),
+ * `generation` (u8, counts up each time the slot is taken), one byte unused. A timer's number is its slot plus 8 times the generation (0 to
+ * 255), so korg.cancel with the number of a timer that already ran does not stop the one that took its slot since.
+ * The frame hook checks the clock timers every frame (40 ms): one runs at the earliest `ms` after the call, at the latest a
+ * frame later. A step timer counts the step events while the sequencer plays.
+ */
+export const TIMERS = Object.freeze({
+  slots: 8,
+  recordSize: 12,
+  maxMs: 86400000,
+  maxSteps: 65535,
+  KIND: Object.freeze({ FREE: 0, MS: 1, STEPS: 2 }),
+  fields: Object.freeze([["due", 0], ["period", 4], ["callback", 8], ["kind", 9], ["generation", 10]].map(([name, offset]) => Object.freeze({ name, offset }))),
+});
+
+/**
+ * What a plugin keeps from the firmware (the input filter masks an input when ANY running plugin masks it, the plugins get every
+ * input either way): four words in its entry, the keys 0 to 31, the keys 32 and 33, a bit per knob and 1 when it holds the pads.
+ */
+export const HOLDS_BYTES = 16;
+export const SCRIPT_ENTRY = Object.freeze({
+  size: 48 + EVENTS.length * 8 + 4 + STORE.slots * 4 + TIMERS.slots * TIMERS.recordSize + HOLDS_BYTES,
+  fields: Object.freeze([
+    ["next", 0], ["blob", 4], ["vars", 8], ["state", 12], ["fault", 16], ["offset", 20],
+    ["line", 24], ["event", 28], ["ops", 32], ["cost", 36], ["maxTicks", 40], ["maxCost", 44], ["maxEventTicks", 44 + EVENTS.length * 4], ["readySent", 44 + EVENTS.length * 8],
+    ["storeMask", 48 + EVENTS.length * 8], ["store", 52 + EVENTS.length * 8], ["timers", 52 + EVENTS.length * 8 + STORE.slots * 4],
+    ["holds", 52 + EVENTS.length * 8 + STORE.slots * 4 + TIMERS.slots * TIMERS.recordSize],
+  ].map(([name, offset]) => Object.freeze({ name, offset, words: name === "maxCost" || name === "maxEventTicks" ? EVENTS.length : name === "store" ? STORE.slots : name === "timers" ? TIMERS.slots * TIMERS.recordSize / 4 : name === "holds" ? HOLDS_BYTES / 4 : 1 }))),
+});
+export const SCRIPT_STATE = Object.freeze({ LOADED: 1, ARMED: 2, DISABLED: 3 });
+
+export const SCRIPT_CONTROL = Object.freeze({
+  headerSize: 256,
+  fields: Object.freeze([
+    ["armed", 96], ["ready", 100], ["ringHead", 104], ["ringTail", 108],
+    ["frameStart", 112], ["frameActive", 116], ["cursorEntry", 120], ["cursorEvent", 124],
+    ["cursorArgs", 128, 3], ["cursorRingEnd", 140], ["cursorPhase", 144], ["captureMask", 148],
+    ["frames", 152], ["paused", 156], ["ledSent", 160],
+    ["cardStatus", 164], ["cardLoaded", 168], ["cardRejected", 172], ["cardFirstError", 176],
+    ["displayActive", 180], ["storePending", 184], ["storeFrame", 188], ["storeGeneration", 192], ["storeBytes", 196],
+    ["storeErrors", 200], ["storeWrites", 204],
+    ["clockInit", 208], ["clockLast", 212], ["clockRem", 216], ["clockMs", 220],
+    ["seqInit", 224], ["seqTransport", 228], ["seqTempo", 232], ["seqPattern", 236], ["seqPart", 240], ["seqStep", 244], ["seqMutes", 248],
+    ["ledHold", 252],
+  ].map(([name, offset, words = 1]) => Object.freeze({ name, offset, words }))),
+});
+export const SCRIPT_PHASE = Object.freeze({ READY: 0, QUEUED: 1, FRAME: 2, IDLE: 3 });
+export const SCRIPT_EVENT_RECORD = Object.freeze({
+  size: 16,
+  fields: Object.freeze([
+    Object.freeze({ name: "event", offset: 0, words: 1 }),
+    Object.freeze({ name: "args", offset: 4, words: 3 }),
+  ]),
+});
+
+const eventMask = names => names.reduce((m, n) => m | (1 << EVENT_BY_NAME.get(n).id), 0) >>> 0;
+const ALL = EVENTS.map(e => e.name);
+const UI = EVENTS.filter(e => e.name !== "start" && e.name !== "save").map(e => e.name);
+const MENU_ADD = ["start", "ready"];
+const APP_ONLY = ["start"];
+/** The timer calls work everywhere but in `save`, which runs in another task than the frame hook that reads the timers. */
+const TIMER_USE = ALL.filter(n => n !== "save");
+
+/**
+ * The pages plugins add to the BLECH menu (korg.menu.add): how many all plugins have together, the groups a plugin can move a
+ * page into (korg.menu.group; on the device a group's number is its place here plus 1, 0 is the plugin's own pages under PLUGINS)
+ * and the characters of a text that stands for the value (korg.menu.text).
+ */
+export const SCRIPT_MENU = Object.freeze({ pages: 64, groups: Object.freeze(["FEATURES", "CUSTOMIZATION", "DEV"]), textLength: 15 });
+/**
+ * korg.read.ram: the first and the last address of a word in the RAM window, which is what READ of BLECH's SysEx commands reads
+ * (data/protected.mjs: outside the window nothing, inside it no region is refused for reads; test/script-api27.test.mjs holds that).
+ */
+export const SCRIPT_RAM = Object.freeze({ first: 0xC0000000, last: 0xC7FFFFFC });
+
+const int = (name, min = -2147483648, max = 2147483647) => ({ name, kind: "int", min, max });
+const str = name => ({ name, kind: "str" });
+/** A global array, handed over as one value that holds its first slot (16 bits) and its length (16 bits, above). `strip` names the argument that cuts it into strips. */
+const arr = (name, strip) => ({ name, kind: "arr", strip });
+
+/** Fuel units for each slot of a bitmap's array, on top of the call's cost of 14: the ARM routine takes 63 instructions for the call, at most 28 for a lit slot and about 20 more for each band of a picture one slot wide, at 10 instructions to a unit (tools/patch/test_script_display.py counts them against these numbers). */
+const BITMAP_ITEM_COST = 3;
+
+const API_LIST = [
+  // id, name, args, returns, events, cost (one byte), since, perItem. Display costs follow the native instruction counts in
+  // Unicorn at 10 instructions to a unit, for a short call, capped at 250; the 5 ms frame budget limits real time.
+  [1, "korg.led", [int("index", 0, 87), int("level", 0, 255)], "void", UI, 6, 1],
+  [2, "korg.millis", [], "int", ALL, 3, 1],
+  [16, "korg.display.clear", [], "void", UI, 80, 1],
+  [17, "korg.display.text", [str("text"), int("x", 0, 127), int("y", 0, 63)], "void", UI, 250, 1],
+  [18, "korg.display.number", [int("value"), int("x", 0, 127), int("y", 0, 63)], "void", UI, 250, 1],
+  [19, "korg.display.pixel", [int("x", 0, 127), int("y", 0, 63), int("on", 0, 1)], "void", UI, 4, 1],
+  [20, "korg.display.rect", [int("x", 0, 127), int("y", 0, 63), int("width", 1, 128), int("height", 1, 64)], "void", UI, 40, 1],
+  [21, "korg.display.clearRect", [int("x", 0, 127), int("y", 0, 63), int("width", 1, 128), int("height", 1, 64)], "void", UI, 40, 1],
+  [22, "korg.display.take", [], "int", UI, 80, 5],
+  [23, "korg.display.release", [], "void", UI, 4, 5],
+  [24, "korg.display.bitmap", [arr("array", "width"), int("x", -128, 127), int("y", -64, 63), int("width", 1, 128)], "void", UI, 14, 6, BITMAP_ITEM_COST],
+  [25, "korg.display.textNumber", [str("text"), int("value"), int("x", 0, 127), int("y", 0, 63)], "void", UI, 250, 6],
+  [32, "korg.store.get", [int("slot", 0, 15), int("fallback")], "int", ALL, 4, 2],
+  [33, "korg.store.set", [int("slot", 0, 15), int("value")], "void", ALL, 4, 2],
+  [34, "korg.store.save", [], "void", UI, 20, 2],
+  [35, "korg.read.transport", [], "int", ALL, 4, 3],
+  [36, "korg.read.tempo", [], "int", ALL, 4, 3],
+  [37, "korg.read.pattern", [], "int", ALL, 4, 3],
+  [38, "korg.read.part", [], "int", ALL, 4, 3],
+  [39, "korg.read.step", [int("part", 0, 15)], "int", ALL, 4, 3],
+  [40, "korg.read.mute", [int("part", 0, 15)], "int", ALL, 4, 3],
+  [41, "korg.read.knob", [int("index", 0, 19)], "int", ALL, 4, 3],
+  [42, "korg.read.chainMode", [], "int", ALL, 4, 8],
+  [43, "korg.read.patternValue", [int("pattern", -1, 249), int("part", -1, 15), int("field", 0, 31)], "int", ALL, 6, 8],
+  [44, "korg.remapKey", [int("from", 0, 33), int("to", 0, 33)], "void", MENU_ADD, 20, 8],
+  [45, "korg.seq.setStep", [int("part", 0, 15), int("step", 0, 63), int("note", -1, 127), int("velocity", 0, 127)], "void", UI, 6, 9],
+  [46, "korg.seq.setGate", [int("part", 0, 15), int("step", 0, 63), int("gate", 0, 127)], "void", UI, 4, 9],
+  [47, "korg.seq.clearPart", [int("part", 0, 15)], "void", UI, 30, 9],
+  [48, "korg.play", [], "void", UI, 30, 3],
+  [49, "korg.stop", [], "void", UI, 30, 3],
+  [50, "korg.pattern", [int("index", 0, 249)], "void", UI, 30, 3],
+  [51, "korg.tempo", [int("tenthsBpm", 100, 3000)], "void", UI, 30, 3],
+  [52, "korg.part", [int("part", 0, 15)], "void", UI, 30, 3],
+  [53, "korg.mute", [int("part", 0, 15), int("muted", 0, 1)], "void", UI, 30, 3],
+  [56, "korg.backlight", [int("red", 0, 1), int("green", 0, 1), int("blue", 0, 1)], "void", UI, 20, 3],
+  [57, "korg.ledHold", [int("on", 0, 1)], "void", UI, 100, 3],
+  [58, "korg.menu.add", [str("label"), int("min", -1000000, 1000000), int("max", -1000000, 1000000), int("value", -1000000, 1000000)], "int", MENU_ADD, 60, 4],
+  [59, "korg.app", [str("name"), str("group")], "int", APP_ONLY, 60, 5],
+  [60, "korg.file.frame", [arr("array"), int("file", 0, 99), int("index", 0, 65535)], "int", UI, 250, 7],
+  // the object tree (data/script/objects.mjs): the compiler calls these for the paths, index -1 for a leaf without brackets
+  [61, "korg.get", [int("leaf", 0, 255), int("index", -1, 255)], "int", ALL, 6, 10],
+  [62, "korg.set", [int("leaf", 0, 255), int("index", -1, 255), int("value")], "void", UI, 60, 10],
+  // timers (TIMERS): the compiler passes the function as its callback number and builds the handler of the event timer
+  [63, "korg.after", [int("ms", 0, TIMERS.maxMs), int("callback", 0, 255)], "int", TIMER_USE, 10, 11],
+  [64, "korg.every", [int("ms", 1, TIMERS.maxMs), int("callback", 0, 255)], "int", TIMER_USE, 10, 11],
+  [65, "korg.afterSteps", [int("steps", 1, TIMERS.maxSteps), int("callback", 0, 255)], "int", TIMER_USE, 10, 11],
+  [66, "korg.cancel", [int("timer", -1, TIMERS.slots * 32 - 1)], "void", TIMER_USE, 6, 11],
+  [67, "korg.padHold", [int("on", 0, 1)], "void", UI, 20, 12],
+  [68, "korg.knobHold", [int("index", 0, 10), int("on", 0, 1)], "void", UI, 20, 13],
+  [69, "korg.knob", [int("index", 0, 10), int("value", 0, 255)], "void", UI, 30, 13],
+  [70, "korg.passKeys", [int("key", 0, 33), int("on", 0, 1)], "void", UI, 20, 14],
+  [71, "korg.seq.setPartValue", [int("part", 0, 15), int("field", 0, 31), int("value")], "void", UI, 60, 14],
+  [72, "korg.read.patternBytes", [arr("array"), int("pattern", -1, 249), int("offset", 0, 16383)], "int", UI, 6, 14, 1],
+  [73, "korg.seq.writeSteps", [arr("array"), int("part", 0, 15), int("first", 0, 63)], "int", UI, 10, 14, 1],
+  [74, "korg.touchLockX", [int("x", -1, 127)], "void", UI, 20, 15],
+  [75, "korg.keyHold", [int("key", 0, 33), int("on", 0, 1)], "void", UI, 20, 15],
+  [76, "korg.pressKey", [int("key", 0, 33)], "void", UI, 30, 15],
+  [77, "korg.seq.setPatternValue", [int("field", 0, 31), int("value")], "void", UI, 60, 15],
+  [78, "korg.read.viewedPattern", [], "int", ALL, 6, 18],
+  [79, "korg.read.nextPattern", [], "int", ALL, 6, 18],
+  // the keys a plugin keeps from the firmware, as one mask: bit n of `low` is key n (0 to 31), bit n of `high` key 32 + n
+  [80, "korg.keyMask", [int("low"), int("high", 0, 3)], "void", UI, 20, 19],
+  // the bytes of a step in the pattern in RAM, as they are (PATTERN_STEPS); reads only, like korg.read.patternValue they work in every event
+  [81, "korg.seq.getOn", [int("part", 0, 15), int("step", 0, 63)], "int", ALL, 4, 22],
+  [82, "korg.seq.getGate", [int("part", 0, 15), int("step", 0, 63)], "int", ALL, 4, 22],
+  [83, "korg.seq.getNote", [int("part", 0, 15), int("step", 0, 63), int("slot", 0, 3)], "int", ALL, 4, 22],
+  [84, "korg.seq.getVelocity", [int("part", 0, 15), int("step", 0, 63)], "int", ALL, 4, 22],
+  // whether this plugin's writes open the firmware's parameter window as a knob does (1, the default) or leave it shut (0)
+  [85, "korg.display.popups", [int("on", 0, 1)], "void", UI, 20, 24],
+  [86, "korg.read.popups", [], "int", ALL, 4, 24],
+  // the panel as a finger works it (API 25): each call puts the message the panel sends into the panel queue, marked, so it reaches
+  // the firmware past remap, holds, app and shortcuts and no plugin; ids from 100, so they stay clear of the calls of API 24
+  [100, "korg.keyDown", [int("key", 0, 33)], "void", UI, 30, 25],
+  [101, "korg.keyUp", [int("key", 0, 33)], "void", UI, 30, 25],
+  [102, "korg.padDown", [int("pad", 0, 15), int("velocity", 1, 127)], "void", UI, 30, 25],
+  [103, "korg.padUp", [int("pad", 0, 15)], "void", UI, 30, 25],
+  [104, "korg.encoder", [int("index", 0, 4), int("delta", -127, 127)], "void", UI, 30, 25],
+  [105, "korg.touch", [int("x", -1, 1023), int("y", 0, 1023)], "void", UI, 40, 25],
+  // API 26: the display light and the bottom LEDs as a plugin sets them while it runs (given back when it stops), a sample's
+  // length, rate and tune from the firmware's tables (index is the slot minus 1), the unsaved pattern and its save
+  [106, "korg.backlightLevel", [int("red", 0, 15), int("green", 0, 15), int("blue", 0, 15)], "void", UI, 40, 26],
+  [107, "korg.backlightRelease", [], "void", UI, 40, 26],
+  [108, "korg.bottomLed", [int("led", 0, 3), int("red", 0, 255), int("green", 0, 255), int("blue", 0, 255)], "void", UI, 6, 26],
+  [109, "korg.bottomRelease", [], "void", UI, 6, 26],
+  [110, "korg.read.sampleFrames", [int("index", 0, 998)], "int", ALL, 6, 26],
+  [111, "korg.read.sampleRate", [int("index", 0, 998)], "int", ALL, 14, 26],
+  [112, "korg.read.sampleTune", [int("index", 0, 998)], "int", ALL, 6, 26],
+  [113, "korg.read.unsaved", [], "int", ALL, 4, 26],
+  [114, "korg.quickSave", [], "int", UI, 60, 26],
+  // API 27: a page of korg.menu.add in a group of the BLECH menu, a text or another number as its value (-1, the page that was
+  // refused, and a page of another plugin are left alone), and a word of RAM
+  [115, "korg.menu.group", [int("page", -1, SCRIPT_MENU.pages - 1), str("group")], "void", MENU_ADD, 20, 27],
+  [116, "korg.menu.text", [int("page", -1, SCRIPT_MENU.pages - 1), str("text")], "void", TIMER_USE, 60, 27],
+  [117, "korg.menu.value", [int("page", -1, SCRIPT_MENU.pages - 1), int("value")], "void", TIMER_USE, 60, 27],
+  [118, "korg.read.ram", [int("address", SCRIPT_RAM.first | 0, SCRIPT_RAM.last | 0)], "int", ALL, 6, 27],
+];
+
+/**
+ * API table. Ids are stable and may have gaps (ids 32 and up are reserved for
+ * store, menu and sequencer reads in later phases). `events` is the list of
+ * events whose handlers, and the functions they call, may use the entry.
+ * `cost` is added to the fuel on every call, and `perItem` more for each slot of an array argument.
+ * Int arguments are range-checked by the VM from min and max, so a host function only sees valid values;
+ * a text argument reaches the host as the string, not the index; an array argument reaches it as the
+ * slots themselves, after the VM has checked that they lie inside the variable area. The compiler passes
+ * only a global array there: it pushes the one value ARRAY_HANDLE builds from the array's first slot and its length.
+ */
+export const API = Object.freeze(API_LIST.map(([id, name, args, returns, events, cost, since, perItem = 0]) =>
+  Object.freeze({ id, name, args: Object.freeze(args), returns, events: Object.freeze(events), eventMask: eventMask(events), cost, since, perItem })));
+/**
+ * The value an array argument is passed as: the array's first variable slot in the low 16 bits and its length in the
+ * high 16. It is a plain 32-bit integer on the stack, so a blob can forge one; the VM checks it every call.
+ */
+export const ARRAY_HANDLE = Object.freeze({
+  make: (base, length) => ((length << 16) | base) | 0,
+  base: handle => handle & 0xFFFF,
+  length: handle => handle >>> 16,
+});
+
+export const API_BY_ID = new Map(API.map(a => [a.id, a]));
+export const API_BY_NAME = new Map(API.map(a => [a.name, a]));
+
+const LED_API = API_BY_NAME.get("korg.led");
+const LED_COUNT = LED_API.args[0].max + 1;
+export const SCRIPT_LED = Object.freeze({
+  count: LED_COUNT,
+  levelMax: LED_API.args[1].max,
+  packetBytes: 5,
+  perFrame: 16,
+  reserveBytes: 256,
+  size: LED_COUNT * 4 + 4,
+  fields: Object.freeze([
+    ["desired", 0, LED_COUNT], ["delivered", LED_COUNT, LED_COUNT],
+    ["pending", LED_COUNT * 2, LED_COUNT], ["valid", LED_COUNT * 3, LED_COUNT],
+    ["nextIndex", LED_COUNT * 4, 4],
+  ].map(([name, offset, bytes]) => Object.freeze({ name, offset, bytes }))),
+});
+export const SCRIPT_LED_VALID = Object.freeze({ DESIRED: 1, DELIVERED: 2 });
+
+/**
+ * The script display: a 1024 byte copy in the runtime that korg.display.*
+ * draws into (8 pages of 128 columns, bit 0 the top row). While a script has
+ * drawn and the firmware shows its main screen, the frame hook copies it over
+ * the firmware's display RAM after the firmware has drawn its widgets.
+ */
+/**
+ * The values of a pattern that korg.read.patternValue(pattern, part, field) reads, and the properties korg.current.*,
+ * korg.patterns[i].* and korg.parts[i].* stand for. `field` is the index in the list: PATTERN_FIELDS with part -1,
+ * PART_FIELDS with part 0 to 15. Offsets are those of data/map/pattern.mjs, a part's from 0x800 + part * 0x330. The kind
+ * says how the bytes become the value: u8, s8 (signed), u16 (little endian), bars (the length byte 0 to 3 as 1 to 4),
+ * chain (Chain To counted from 1 as 0 to 249, -1 for none), atLeast1 (Chain Repeat, the device shows 0 as 1).
+ * Field indices are never reused or renumbered; new fields go at the end.
+ */
+export const PATTERN_FIELD_KINDS = Object.freeze(["u8", "s8", "u16", "bars", "chain", "atLeast1"]);
+const field = (name, offset, kind, text) => Object.freeze({ name, offset, kind, text });
+export const PATTERN_FIELDS = Object.freeze([
+  field("tempo", 34, "u16", text("api.pattern.tempo")),
+  field("swing", 36, "s8", text("api.pattern.swing")),
+  field("length", 37, "bars", text("api.pattern.length")),
+  field("beat", 38, "u8", text("api.pattern.beat")),
+  field("key", 39, "u8", text("api.pattern.key")),
+  field("scale", 40, "u8", text("api.pattern.scale")),
+  field("chordSet", 41, "u8", text("api.pattern.chordSet")),
+  field("level", 42, "u8", text("api.pattern.level")),
+  field("mfxType", 61, "u8", text("api.pattern.mfxType")),
+  field("chainTo", 15104, "chain", text("api.pattern.chainTo")),
+  field("chainRepeat", 15106, "atLeast1", text("api.pattern.chainRepeat")),
+  field("gateArp", 49, "u8", text("api.pattern.gateArp")),
+  field("syncGroup", 15232, "u16", text("api.pattern.syncGroup")),
+  field("alternate1314", 68, "u8", text("api.pattern.alternate1314")),
+  field("alternate1516", 69, "u8", text("api.pattern.alternate1516")),
+  field("mfxHold", 65, "u8", text("api.pattern.mfxHold")),
+  field("mfxPadX", 62, "u8", text("api.pattern.mfxPadX")),
+  field("mfxPadY", 63, "u8", text("api.pattern.mfxPadY")),
+]);
+export const PART_FIELDS = Object.freeze([
+  field("sample", 8, "u16", text("api.part.sample")),
+  field("filterType", 12, "u8", text("api.part.filterType")),
+  field("cutoff", 13, "u8", text("api.part.cutoff")),
+  field("resonance", 14, "u8", text("api.part.resonance")),
+  field("egInt", 15, "s8", text("api.part.egInt")),
+  field("modType", 16, "u8", text("api.part.modType")),
+  field("modSpeed", 17, "u8", text("api.part.modSpeed")),
+  field("modDepth", 18, "u8", text("api.part.modDepth")),
+  field("attack", 20, "u8", text("api.part.attack")),
+  field("decay", 21, "u8", text("api.part.decay")),
+  field("level", 24, "u8", text("api.part.level")),
+  field("pan", 25, "s8", text("api.part.pan")),
+  field("ifxOn", 32, "u8", text("api.part.ifxOn")),
+  field("ifxType", 33, "u8", text("api.part.ifxType")),
+  field("ifxEdit", 34, "u8", text("api.part.ifxEdit")),
+  field("pitch", 36, "s8", text("api.part.pitch")),
+  field("glide", 37, "u8", text("api.part.glide")),
+  field("voiceAssign", 2, "u8", text("api.part.voiceAssign")),
+  field("oscEdit", 11, "u8", text("api.part.oscEdit")),
+  field("mfxSend", 27, "u8", text("api.part.mfxSend")),
+  field("ampEg", 26, "u8", text("api.part.ampEg")),
+  field("lastStep", 0, "u8", text("api.part.lastStep")),
+  field("motionMode", 3, "u8", text("api.part.motionMode")),
+  field("padVelocity", 4, "u8", text("api.part.padVelocity")),
+  field("scaleMode", 5, "u8", text("api.part.scaleMode")),
+  field("priority", 6, "u8", text("api.part.priority")),
+  field("grooveType", 28, "u8", text("api.part.grooveType")),
+  field("grooveDepth", 29, "u8", text("api.part.grooveDepth")),
+]);
+/**
+ * The PART_FIELDS korg.seq.setPartValue writes, by name: the firmware's parameter number of its part edit (the setter the
+ * knobs go through, which writes the pattern and the sound engine's copy), the code of the parameter window a knob opens,
+ * and the range the value is clamped to. Voice assign, MFX send, AMP EG, IFX on and IFX type go through the firmware's direct
+ * setter of the field instead (tools/patch/script_hooks.py, PART_SETTERS), parameter number and window code are 0 there; IFX
+ * type is clamped further to the build's type count. Sample goes through the part edit with the whole slot number, 0 to 999,
+ * and only to a slot the SAMPLE knob stops on, on a sliced sample with its slice as well. Since API 24 the fields the menu
+ * pages of the Part menu set (last step to groove depth) go through that page's setter, and a value whose knob, encoder or key
+ * sends a MIDI CC sends the same CC (PART_CC in script_hooks.py; docs/messungen/2026-11-06-plugin-api21-pattern-parts.md,
+ * docs/messungen/2026-11-07-plugin-api23-part-writes.md, docs/messungen/2026-11-08-plugin-api24-part-cc.md).
+ */
+export const PART_WRITES = Object.freeze({
+  filterType: [10, 10, 0, 16], cutoff: [11, 3, 0, 127], resonance: [12, 4, 0, 127], egInt: [13, 5, -63, 63],
+  modType: [14, 10, 0, 71], modSpeed: [15, 12, 0, 127], modDepth: [16, 11, 0, 127], attack: [17, 9, 0, 127],
+  decay: [18, 8, 0, 127], level: [19, 6, 0, 127], pan: [20, 7, -63, 63], ifxEdit: [27, 14, 0, 127],
+  pitch: [28, 15, -63, 63], glide: [29, 16, 0, 127], oscEdit: [6, 1, 0, 127],
+  voiceAssign: [0, 0, 0, 3], mfxSend: [0, 0, 0, 1], ampEg: [0, 0, 0, 1], ifxOn: [0, 0, 0, 1], ifxType: [26, 13, 0, 127],
+  sample: [8, 0, 0, 999],
+  lastStep: [0, 0, 0, 15], motionMode: [0, 0, 0, 2], padVelocity: [0, 0, 0, 1], scaleMode: [0, 0, 0, 1], priority: [0, 0, 0, 1],
+  grooveType: [0, 0, 0, 127], grooveDepth: [0, 0, 0, 127],
+});
+/** The PART_WRITES fields that came with a later API version than korg.seq.setPartValue: the version, by name. */
+export const PART_WRITE_SINCE = Object.freeze({ voiceAssign: 21, mfxSend: 21, ampEg: 23, ifxOn: 23, ifxType: 23, sample: 23,
+  lastStep: 24, motionMode: 24, padVelocity: 24, scaleMode: 24, priority: 24, grooveType: 24, grooveDepth: 24 });
+/** The PART_FIELDS that came with a later API version than korg.read.patternValue: the version, by name. */
+export const PART_FIELD_SINCE = Object.freeze({ ampEg: 23, lastStep: 24, motionMode: 24, padVelocity: 24, scaleMode: 24, priority: 24,
+  grooveType: 24, grooveDepth: 24 });
+/**
+ * The PATTERN_FIELDS korg.seq.setPatternValue writes, by name: the range the value is clamped to, in the units
+ * korg.read.patternValue gives (the ranges of data/map/pattern.mjs, decoded by the field's kind: length 1 to 4 bars,
+ * Chain To -1 for none). The firmware's setters are per build in tools/patch/script_hooks.py (PATTERN_SETTERS); Sync Group
+ * has none, it is stored as the SYNC GROUP page of the EDIT menu stores it.
+ */
+export const PATTERN_WRITES = Object.freeze({
+  tempo: [200, 3000], swing: [-48, 48], length: [1, 4], beat: [0, 4], key: [0, 11], scale: [0, 34], chordSet: [0, 4],
+  level: [0, 127], mfxType: [0, 39], chainTo: [-1, 249], chainRepeat: [0, 127], gateArp: [0, 49],
+  syncGroup: [0, 999], alternate1314: [0, 1], alternate1516: [0, 1], mfxHold: [0, 1], mfxPadX: [0, 127], mfxPadY: [0, 127],
+});
+/** The PATTERN_FIELDS that came with a later API version than korg.read.patternValue: the version, by name. */
+export const PATTERN_FIELD_SINCE = Object.freeze({ syncGroup: 21, alternate1314: 24, alternate1516: 24, mfxHold: 24, mfxPadX: 24,
+  mfxPadY: 24 });
+/** Where a part starts in a pattern block, and the distance from one part to the next. */
+export const PATTERN_PARTS = Object.freeze({ base: 0x800, stride: 0x330, bytes: 0x4000 });
+
+/**
+ * The steps korg.seq.* writes, in a part of the pattern in RAM: `count` records of `stride` bytes from `base` in the part
+ * (data/map/pattern.mjs, step.*). A record holds on, gate (above 96 a tie), velocity, trigger and four note places, each the
+ * note plus one, 0 for none. setStep writes on, velocity, trigger (0 behind a step on with a TIE, gate above 96; 1 else) and the
+ * first note place and clears the other three, as
+ * the dice patch does (tools/patch/dice.py), or with note -1 or velocity 0 only the on byte; setGate writes the gate;
+ * clearPart sets every on byte to 0. The pads draw the steps again once at the end of the frame. getOn, getGate and
+ * getVelocity return their byte as it is, getNote the note of a place (-1 for 0); they mark nothing for the pads.
+ */
+export const PATTERN_STEPS = Object.freeze({ base: 0x30, stride: 12, count: 64, on: 0, gate: 1, velocity: 2, trigger: 3, notes: 4 });
+
+/** Knob values the input filter keeps for korg.read.knob: one word per knob, raw panel value. */
+export const SCRIPT_KNOBS = 20;
+
+/**
+ * Apps (korg.app): a script that has its own screen. The runtime keeps a small table after its other areas: the open app
+ * (its script entry, 0 when none), the count and one record per app (script entry, pointer to its name text in the block,
+ * group). Only the open app draws on the display and gets `frame`; the BLECH menu lists the apps by group.
+ * A plugin that is no app can take the display with korg.display.take() while the main screen shows; EXIT ends that the
+ * same way it closes an app. Whoever owns the display is the one entry in this table's `open` word.
+ * One record of the table is the firmware's own app, Blechy, built into BLECH: it is always record 0, in the group
+ * BUILTIN, which no menu lists. `max` is what plugins can declare, `slots` what the table holds.
+ */
+export const SCRIPT_APPS = Object.freeze({
+  max: 12,
+  builtin: 1,
+  slots: 12 + 1,
+  groups: Object.freeze(["GAMES", "TOOLS"]),
+  builtinGroup: 2,
+  nameLength: 15,
+  recordSize: 12,
+  /** Frames after an open in which the firmware may still be on its way to the main screen (its screen switch is a queued message). */
+  openGrace: 3,
+  stateSize: 8 + 13 * 12 + 4,
+  fields: Object.freeze([["open", 0], ["count", 4], ["table", 8], ["grace", 8 + 13 * 12]].map(([name, offset]) => Object.freeze({ name, offset }))),
+  recordFields: Object.freeze([["entry", 0], ["name", 4], ["group", 8]].map(([name, offset]) => Object.freeze({ name, offset }))),
+});
+
+export const SCRIPT_DISPLAY = Object.freeze({ width: 128, height: 64, bytes: 1024, ram: 0xC031B310 });
+
+/**
+ * A picture file for korg.file.frame on the card, `SD:KORG/blechtribe/Gif/GIFnn.E2G` (nn the file number, two digits), little
+ * endian: "GGIF", version (u16), frame count (u16), then each frame as its delay in milliseconds (u16), two zero bytes and the
+ * 1024 bytes of a whole display in the layout of its memory (src/script/gif.mjs packs and reads it).
+ */
+export const SCRIPT_GIF = Object.freeze({ magic: 0x46494747, version: 1, header: 8, frameHeader: 4, frameBytes: 1024, maxFile: 99,
+  folder: "KORG/blechtribe/Gif/" });
+
+/*
+ * korg.display.bitmap(array, x, y, width): the picture is laid out like the display's own memory. One slot holds the 8
+ * pixels of one column in one band, bit 0 the top pixel (only the lowest 8 bits count); a band is `width` slots, columns
+ * left to right, and the bands follow each other from the top. The height is 8 times the number of whole bands the array
+ * holds (its length divided by `width`); slots after the last whole band are not read. Only lit pixels are drawn, nothing is
+ * erased, and what lies beyond an edge is cut off.
+ */
+
+/**
+ * The collection file `e2sPlugin.all` on the card, little endian: a 16 byte
+ * header, then script blocks (format 2, each carrying its own size and CRC)
+ * one after the other; a block's size is a multiple of 4 by construction, so
+ * nothing is padded. The checksum is CRC-32
+ * (IEEE) over everything from offset 16 to totalSize. The loader reads one
+ * block at a time into a buffer of `maxBlock` bytes, so no block may be larger.
+ */
+export const ARCHIVE = Object.freeze({
+  magic: 0x4C415347,
+  version: 1,
+  headerSize: 16,
+  checksumFrom: 16,
+  maxBlock: 32752,
+  folder: "KORG/blechtribe/Plugin",
+  file: "e2sPlugin.all",
+  fields: Object.freeze([
+    { name: "magic", offset: 0, type: "u32" },
+    { name: "version", offset: 4, type: "u16" },
+    { name: "count", offset: 6, type: "u16" },
+    { name: "totalSize", offset: 8, type: "u32" },
+    { name: "checksum", offset: 12, type: "u32" },
+  ]),
+});
+
+/**
+ * A `.blech` file is one block followed by an optional source trailer: the
+ * tag "GSRC", the source length as u32 and the UTF-8 source. The device
+ * reads the block only; the editor reads the trailer to reopen the script.
+ */
+export const SOURCE_TRAILER = Object.freeze({ magic: 0x43525347, headerSize: 8, extension: ".blech" });
+
+/** "GDSC", u32 length, ASCII lines of `width` characters at most, each ending in "\n"; behind the block, in front of the source. */
+export const DESC_TRAILER = Object.freeze({ magic: 0x43534447, headerSize: 8, width: 20, maxBytes: 2047 });
+
+/** What the boot loader leaves in the control block as `cardStatus`; the words stay 0xFFFFFFFF until it has run. */
+export const CARD_STATUS = Object.freeze({
+  LOADED: 1, NO_FILE: 2, BAD_HEADER: 3, BAD_CHECKSUM: 4, READ_ERROR: 5, BLOCK_SIZE: 6, KILL_SWITCH: 7, NO_PANEL: 8, SETTINGS_OFF: 9,
+});
+
+const ERROR_LIST = [
+  // code, name, phase (load, run or both), message
+  [0, "OK", "both", text("api.error.ok")],
+  [1, "FUEL", "run", text("api.error.fuel")],
+  [2, "BAD_OPCODE", "both", text("api.error.badOpcode")],
+  [3, "BOUNDS", "run", text("api.error.bounds")],
+  [4, "DIV_ZERO", "run", text("api.error.divZero")],
+  [5, "STACK", "both", text("api.error.stack")],
+  [6, "BAD_JUMP", "both", text("api.error.badJump")],
+  [7, "TIME", "run", text("api.error.time")],
+  [8, "CALL_DEPTH", "both", text("api.error.callDepth")],
+  [9, "BAD_CONST", "both", text("api.error.badConst")],
+  [10, "BAD_STRING", "both", text("api.error.badString")],
+  [11, "BAD_VAR", "both", text("api.error.badVar")],
+  [12, "API_UNKNOWN", "both", text("api.error.apiUnknown")],
+  [13, "API_ARGC", "both", text("api.error.apiArgc")],
+  [14, "API_EVENT", "both", text("api.error.apiEvent")],
+  [15, "API_ARG", "run", text("api.error.apiArg")],
+  [16, "TRUNCATED", "both", text("api.error.truncated")],
+  [17, "MAGIC", "load", text("api.error.magic")],
+  [18, "FORMAT_VERSION", "load", text("api.error.formatVersion")],
+  [19, "API_VERSION", "both", text("api.error.apiVersion")],
+  [20, "CHECKSUM", "load", text("api.error.checksum")],
+  [21, "LIMITS", "load", text("api.error.limits")],
+  [22, "STACK_MISMATCH", "load", text("api.error.stackMismatch")],
+  [23, "BAD_HANDLER", "load", text("api.error.badHandler")],
+  [24, "BAD_LINES", "load", text("api.error.badLines")],
+  [25, "RECURSION", "load", text("api.error.recursion")],
+  [26, "BAD_SIZE", "load", text("api.error.badSize")],
+  [27, "VARS_BUDGET", "load", text("api.error.varsBudget")],
+  [28, "POOL_BUDGET", "load", text("api.error.poolBudget")],
+];
+
+export const ERRORS = Object.freeze(ERROR_LIST.map(([code, name, phase, message]) => Object.freeze({ code, name, phase, message })));
+export const ERROR = Object.freeze(Object.fromEntries(ERRORS.map(e => [e.name, e.code])));
+export const ERROR_BY_CODE = new Map(ERRORS.map(e => [e.code, e]));

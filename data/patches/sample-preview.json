@@ -1,0 +1,156 @@
+{
+ "format": "gelumpe-patch",
+ "version": 1,
+ "id": "sample-preview",
+ "name": "Sample-Vorschau",
+ "builds": [
+  "stock"
+ ],
+ "notNeededOn": [
+  "hacktribe"
+ ],
+ "changes": [
+  {
+   "file": 1757440,
+   "bytes": "0f502de9010052e30a00001a1b0000eb0800001a020051e30100001a350000eb040000ea010051e30100001a1a0000eb000000ea290000eb0f50bde8a4cffaea0f502de9250000eb0f50bde8d6f5faea0f502de9210000eb0f50bde850f4faea0f502de91d0000eb0f50bde8c8f4faea0f502de9190000eb0f50bde8b8f5faeabcc49fe500c09ce500005ce31eff2f0118c09ce5020a1ce31eff2fe110402de908d04de29c449fe5000094e5010050e30800001a0000a0e3000084e500008de504008de50c0094e54010a0e33c20a0e30030a0e34cb4faeb08d08de21080bde810402de9ecffffeb58449fe50000a0e3100084e51080bde8f04f2de90cd04de20040a0e13cb49fe534009be5000050e30500000a30149fe5001091e5011081e3001041e0fa0051e3db00003adaffffeb10009be5010050e30600001a0c049fe5000090e51f0080e21f00c0e31c109be5010050e1bb00000a0000a0e310008be50c009be5100050e3a3acfb3be0039fe5000090e5010050e3c700000ad4039fe5000090e5000050e301007013c200001a205094e5246094e55c7396e5600396e5007087e0080395e50c1395e5001041e0210157e1b800002a070190e70400d0e5010050e3b400001abf0000eb010070e31000a003af00000a0c008be50500a0e10710a0e1002095e53c2092e532ff2fe10070a0e130008be2fc25faeb0090a0e10900a0e10710a0e10120a0e353c2fbeb000050e30400a0139e00001a38a39fe50100a0e320008ae50900a0e1011b89e20020a0e30030a0e33422faeb0010a0e320108ae57e0050e30200000a040050e32000a0138b0000ea016b89e24180d6e5000058e30180a01324009ae5011088e23051a0e128009ae5180050e303a0a00302a0a0131aa8a0e1c0029fe5000090e51f0080e21f00c0e31c008be5000055e31000a0037700000ab0129fe5001051e00010a033200051e32100a0337100003aa10055e1a150a08194029fe50a10a0e1c953f9eb000055e10050a081950a07e00900a0e1011a89e20720a0e12c308be29fc2fbeb000050e36100001a2c009be5070050e15e00001a0900a0e132c4fbeb000050e30400a0135e00001a02005ae32800000a010a89e20010a0e10520a0e104005ae30500002a03005ae30d00000ab030d0e10338a0e14338a0e1180000ea04005ae30b00001ab030d0e10338a0e14338a0e1b2c0d0e10cc8a0e14c3883e0c330a0e10e0000ea0130d0e502c0d0e50c3483e10a0000ea0130d0e502c0d0e50c3483e10338a0e14338a0e104c0d0e505e0d0e50ec48ce10cc8a0e14c3883e0c330a0e1b030c1e1021081e20a0080e0012052e2d9ffff1a1c609be5017a89e28580a0e1010858e302a9a023a8a0a0310700a0e10610a0e10a20a0e1cd86faeb8a7087e08a6086e08a8058e0f4ffff8a016b89e27f00a0e314008be5b202d6e1b801cbe1b402d6e1ba01cbe1010045e28000a0e120008be524008be50000a0e328008be50c009be5b8b6fbeb08008be50100a0e310008be5fc009fe5000090e5010080e334008be50100a0e300008be50000a0e300008de504008de50c009be54010a0e33c20a0e36430a0e330b6faeb050000ea0400a0e30040a0e10900a0e1d1c3fbeb0400a0e1010000eb0cd08de2f08fbde810402de90020a0e1b4009fe5000090e5000050e31080bd08100080e21b10a0e33505fbeb1080bde870402de994009fe5000090e5144090e50f4004e21050a0e30400a0e18cb6fbebb413d0e178209fe5020051e10b00002a70209fe5812282e0be21d2e1320052e30600003a0000a0e30410a0e10f46fbeb010050e30100000a0400a0e17080bde8014084e20f4004e2015055e2e9ffff1a0000e0e37080bde8f8e633c080de1ac02c296ac0809c0fc0d88518c0388718c0408518c0c05ec60100004000c00434c0808834c0e703000080b047c014c19fe50000a0e338008ce52e30d4e534009ce5000050e31eff2f0108109ce5040051e11eff2f110010a0e334108ce5e8109fe5001091e5011081e3001041e0fa0051e31eff2f210110a0e338108ce5020013e31eff2f010030a0e3bc3fc4e1be3fc4e1011c84e2b030c1e1b230c1e1b430c1e1b630c1e10130a0e31eff2fe1b033c0e190c09fe504109ce5000051e10010a00304108c0538109ce5010051e31eff2f110010a0e338108ce5041090e508209ce5020051e11eff2f11b014d0e1320051e31eff2f3104008ce50010a0e34310c0e50110a0e34210c0e51eff2fe134c09fe504309ce5040053e114508c02b630d5e11eff2fe1076293e718c09fe501002de904009ce5040050e11c208c02006092050100bde81eff2fe180de1ac02c296ac0",
+   "expect": "11ea6c1a65953270d58cd1171de250761731dd85df957f23bb24f621c56a5f61",
+   "note": "sample preview: PLAY in the IMPORT SAMPLE browser plays the WAV under the cursor"
+  },
+  {
+   "file": 932632,
+   "bytes": "70d01ac0",
+   "expect": "86bef1109e2b077053fe686acdeb6caa3051c0a9bcd8ed871b2281eaa74e79d2",
+   "note": "the browser's destructor stops the preview"
+  },
+  {
+   "file": 932640,
+   "bytes": "50d01ac0",
+   "expect": "839f940f1be912a01023906315d84a8daf83aabf396afca0e6f5a96d3e6e3b81",
+   "note": "EXIT in the browser stops the preview"
+  },
+  {
+   "file": 932656,
+   "bytes": "40d01ac0",
+   "expect": "2131eaeef7f302d53314e5fbcee4c26519fbb1bf4af24f29ef3b056fd1972dca",
+   "note": "MENU (ENTER) in the browser stops the preview before the import"
+  },
+  {
+   "file": 932644,
+   "bytes": "00d01ac0",
+   "expect": "b5df7b62fa1e711171363866ffc46f358095388f964801da0779916b288c7d03",
+   "note": "PLAY in the browser starts the preview anew (mono, the file read once), another key stops it"
+  },
+  {
+   "file": 932672,
+   "bytes": "60d01ac0",
+   "expect": "dd437db7967c59e2da581cf20a3e515a757475686931ccf1422645d983b31cb2",
+   "note": "the dial in the browser stops the preview"
+  },
+  {
+   "file": 599036,
+   "bytes": "9d6c04eb",
+   "expect": "c85f34c4677158e0310d21d5ec83b1808e79183265b3a7d2903a05d6096b2587",
+   "note": "the preview's note-on plays as Korg's MONO voice assign: the part's voice retriggers"
+  },
+  {
+   "file": 629576,
+   "bytes": "ea4e04eb",
+   "expect": "831a308e59740ab3b7dd1956d49f5852d209bc981861c53f5ef8c4b51bcbc6ea",
+   "note": "the voice setup gives the preview's note-on a one-shot voice"
+  },
+  {
+   "file": 629884,
+   "bytes": "b54e04eb",
+   "expect": "2e4c1c60c34e1f7d57687d6e153c99d2a0ee563aa12d94f0832cac6150de5203",
+   "note": "the preview's voice takes the preview's period"
+  },
+  {
+   "file": 629948,
+   "bytes": "ab4e04eb",
+   "expect": "2d6aa26c042dfcd4489eb46c5e0242e1507ac90182152f08b27135c645651cb5",
+   "note": "the preview's voice takes the preview's DSP address, loop and end"
+  }
+ ],
+ "hooks": [
+  {
+   "site": "0xC00E3A18",
+   "kind": "vtable-slot",
+   "chain": "sample-preview",
+   "position": "before",
+   "swallow": false,
+   "note": "the browser's destructor stops the preview"
+  },
+  {
+   "site": "0xC00E3A20",
+   "kind": "vtable-slot",
+   "chain": "sample-preview",
+   "position": "before",
+   "swallow": false,
+   "note": "EXIT in the browser stops the preview"
+  },
+  {
+   "site": "0xC00E3A30",
+   "kind": "vtable-slot",
+   "chain": "sample-preview",
+   "position": "before",
+   "swallow": false,
+   "note": "MENU (ENTER) in the browser stops the preview before the import"
+  },
+  {
+   "site": "0xC00E3A24",
+   "kind": "vtable-slot",
+   "chain": "sample-preview",
+   "position": "before",
+   "swallow": false,
+   "note": "PLAY in the browser starts the preview anew (mono, the file read once), another key stops it"
+  },
+  {
+   "site": "0xC00E3A40",
+   "kind": "vtable-slot",
+   "chain": "sample-preview",
+   "position": "before",
+   "swallow": false,
+   "note": "the dial in the browser stops the preview"
+  },
+  {
+   "site": "0xC00922FC",
+   "kind": "instruction",
+   "chain": "sample-preview",
+   "position": "replace",
+   "swallow": false,
+   "note": "the preview's note-on plays as Korg's MONO voice assign: the part's voice retriggers"
+  },
+  {
+   "site": "0xC0099A48",
+   "kind": "instruction",
+   "chain": "sample-preview",
+   "position": "replace",
+   "swallow": false,
+   "note": "the voice setup gives the preview's note-on a one-shot voice"
+  },
+  {
+   "site": "0xC0099B7C",
+   "kind": "instruction",
+   "chain": "sample-preview",
+   "position": "replace",
+   "swallow": false,
+   "note": "the preview's voice takes the preview's period"
+  },
+  {
+   "site": "0xC0099BBC",
+   "kind": "instruction",
+   "chain": "sample-preview",
+   "position": "replace",
+   "swallow": false,
+   "note": "the preview's voice takes the preview's DSP address, loop and end"
+  }
+ ],
+ "ram": [
+  {
+   "at": "0xC01ADE80",
+   "length": 64,
+   "what": "the preview's state: its note on, its voice and part, whether its file is in the DSP, its zone and playback row, the mark of a strike the sound engine has not taken yet",
+   "source": "tools/patch/sample_preview.py:ST"
+  }
+ ]
+}

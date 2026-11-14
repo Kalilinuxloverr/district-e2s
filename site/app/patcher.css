@@ -1,0 +1,502 @@
+/* The Patcher page (patcher.mjs). Own classes carry the prefix cee-; the design system's
+   classes are used as they are and not redefined here. */
+.cee-patch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.cee-patch-title {
+  font-family: var(--font-display);
+  font-size: var(--text-3xl);
+  line-height: 1.15;
+}
+
+.cee-patch-lead {
+  margin: 0;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.cee-patch-verdict {
+  line-height: 1.6;
+}
+
+.cee-patch-route,
+.cee-patch-needs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  line-height: 1.6;
+}
+
+.cee-patch-needs[hidden],
+.cee-patch-route[hidden],
+.cee-patch-way[hidden],
+.cee-patch-usb[hidden],
+.cee-patch-korg[hidden],
+.cee-check[hidden],
+.cee-patch-verdict[hidden],
+.cee-patch-bar[hidden],
+.cee-patch-groups[hidden],
+.cee-patch-result[hidden],
+.cee-patch-sd[hidden],
+.cee-patch-sd-pick[hidden],
+.cee-patch-done[hidden] {
+  display: none;
+}
+
+#cee-patch-note[data-tone="error"] {
+  color: var(--color-text-danger);
+}
+
+.cee-patch-usb,
+.cee-patch-done {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-accent-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-panel-alt);
+}
+
+.cee-patch-usb {
+  border-color: var(--color-border-muted);
+}
+
+.cee-patch-usb-title {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  margin: 0;
+}
+
+.cee-patch-usb .actions {
+  margin: 0;
+}
+
+.cee-patch-guide {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-left: var(--space-6);
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.cee-patch-exit {
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+/* The hint above the emulator after "Ich hab angst ...": text and a close button. */
+.cee-patch-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border-accent-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-item-muted);
+  line-height: 1.6;
+}
+
+.cee-patch-hint p {
+  flex: 1;
+}
+
+.cee-patch-hint .btn {
+  flex-shrink: 0;
+}
+
+/* The groups of the emulator check while it runs: name and state, no pills. */
+.cee-patch-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 14rem));
+  gap: var(--space-1) var(--space-6);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.cee-patch-groups li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.cee-patch-groups li[data-state="running"] {
+  color: var(--color-text-primary);
+}
+
+.cee-patch-groups li[data-state="failed"] {
+  color: var(--color-text-danger);
+}
+
+.cee-patch-group-state {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The way to the new firmware, the step the page is at marked. */
+.cee-patch-way {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cee-patch-way-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.cee-patch-way-n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-weight: 600;
+  flex: none;
+}
+
+.cee-patch-way-step[data-state="current"] {
+  border-color: var(--color-border-accent-strong);
+  color: var(--color-text-accent);
+}
+
+.cee-patch-way-step[data-state="done"] {
+  color: var(--color-text-secondary);
+}
+
+.cee-patch-way-step[data-state="error"] {
+  border-color: var(--color-border-danger);
+  color: var(--color-text-danger);
+}
+
+/* Between the update over USB and the drop zone: the second way, for a device without BLECHTRIBE yet. */
+.cee-patch-or {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+/* One step of the way at a time; Zurück sits bottom left, Weiter bottom right. */
+.cee-patch-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  outline: none;
+}
+
+@media (max-width: 720px) {
+  .cee-patch-panel { gap: var(--space-3); }
+}
+
+.cee-patch-panel[hidden] { display: none; }
+
+.cee-patch-nav {
+  display: flex;
+  gap: var(--space-2);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border-muted);
+}
+
+.cee-patch-nav > :not(#cee-patch-back) { margin-left: auto; }
+
+.cee-patch-nav > [hidden] { display: none; }
+
+.cee-patch-plan {
+  margin: var(--space-3) 0 0;
+  padding-left: var(--space-5);
+  line-height: 1.6;
+}
+
+/* Test choice (step 2): no test needs the consent box ticked. */
+.cee-patch-test-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.cee-patch-test-box > * {
+  margin: 0;
+}
+
+.cee-patch-consent {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-secondary);
+}
+
+.cee-patch-consent[hidden] {
+  display: none;
+}
+
+/* Step 4: the download is the main action, a row of its own across the full width. A width, not a flex-basis: on
+   phones the design system turns .actions into a column. */
+.cee-patch-download {
+  box-sizing: border-box;
+  width: 100%;
+}
+
+/* The buttons below it keep inside a phone's width: a long label wraps instead of pushing the page sideways. */
+.cee-patch-result > .btn {
+  max-width: 100%;
+  white-space: normal;
+}
+
+/* Step 4: where the file goes, large enough to read off while copying. */
+.cee-patch-target {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.cee-patch-target > * {
+  margin: 0;
+}
+
+.cee-patch-path {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xl);
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+
+/* In the app: the card it found, the full place of the file on it. */
+.cee-patch-sd {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-block: var(--space-4);
+}
+
+.cee-patch-sd > * {
+  margin: 0;
+}
+
+.cee-patch-sd-pick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.cee-patch-sd-choice {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+/* Korg's System Updater: the sentence and the two device cards, one block. */
+.cee-patch-korg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Step 2: one choice each, a checkbox and what it switches on. */
+.cee-patch-choice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.cee-patch-choice[hidden] {
+  display: none;
+}
+
+.cee-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* A drop zone the checkbox above has switched off. */
+.cee-patch-choice [data-disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* "Für welche Electribe": the device cards as radio buttons. */
+.cee-patch-device-card {
+  cursor: pointer;
+  padding-right: var(--space-4);
+}
+
+.cee-patch-device-card:has(input:disabled) {
+  cursor: default;
+}
+
+.cee-patch-device-card:has(input:disabled):not(:has(input:checked)) {
+  opacity: 0.45;
+}
+
+.cee-patch-device-card:has(input:focus-visible),
+.cee-patch-card:has(input:focus-visible) {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Every choice of the patcher is a card: a click chooses, Weiter goes on. The chosen card is framed in the accent and
+   carries a filled circle with a tick on its top right corner, half over the frame. The circle is a decoration of the
+   frame, not content in the flow: the grid gap and the panel gap leave it room. */
+.cee-patch-pick,
+.cee-patch-card {
+  position: relative;
+}
+
+.cee-patch-card {
+  cursor: pointer;
+}
+
+.cee-patch-pick[aria-checked="true"],
+.cee-patch-card:has(input:checked) {
+  border-color: var(--color-accent-primary);
+  background: var(--color-surface-panel);
+}
+
+.cee-patch-mark {
+  display: none;
+  position: absolute;
+  top: 0;
+  right: 0;
+  translate: 50% -50%;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-6);
+  height: var(--space-6);
+  border-radius: var(--radius-pill);
+  background: var(--color-accent-primary);
+  color: var(--color-accent-primary-contrast);
+}
+
+.cee-patch-mark svg {
+  width: var(--space-4);
+  height: var(--space-4);
+  stroke-width: 3;
+}
+
+.cee-patch-pick[aria-checked="true"] .cee-patch-mark,
+.cee-patch-card:has(input:checked) .cee-patch-mark {
+  display: flex;
+}
+
+/* A goal the earlier answers rule out: shown with why, but it takes no click. */
+.cee-patch-pick[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.cee-patch-pick[aria-disabled="true"]:hover {
+  border-color: var(--color-border-muted);
+}
+
+/* The test choice of step 3 as cards, three in a row while there is room. */
+#cee-patch-test {
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+}
+
+/* What the goal leaves out of a step is not shown. */
+.cee-patch-panel > [hidden] {
+  display: none;
+}
+
+/* The wizard in front of the way: one question, big choices. */
+.cee-patch-ask {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  line-height: 1.25;
+}
+
+/* Four devices: two per row, one per row on a narrow window. */
+#cee-patch-wiz-devices {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 720px) {
+  #cee-patch-wiz-devices {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* A choice of the wizard is a button with the look of an entry card; no popout icon, so no room kept for one. */
+.cee-patch-pick {
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  justify-content: flex-start;
+  align-items: stretch;
+}
+
+.cee-patch-pick.cee-device-card {
+  align-items: center;
+  padding-right: var(--space-4);
+}
+
+.cee-patch-pick strong {
+  font-size: var(--text-lg);
+}
+
+/* Hacktribe takes the samples away: the warning before it goes on the card, and its acknowledgement. */
+.cee-patch-warn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 2px solid var(--color-border-danger);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-panel-alt);
+  line-height: 1.6;
+}
+
+.cee-patch-warn > * {
+  margin: 0;
+}
+
+.cee-patch-warn[hidden],
+.cee-patch-warn-line[hidden] {
+  display: none;
+}
+
+.cee-patch-warn-title {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  color: var(--color-text-danger);
+}
+
+.cee-patch-warn-line {
+  margin: 0;
+  color: var(--color-text-danger);
+  line-height: 1.6;
+}
+
+/* Step 1: Korg's file shown as a card that is no control. The licence box and Weiter load it, so the card keeps its
+   look but does not react to the pointer. */
+.cee-patch-korg-card:hover {
+  border-color: var(--color-border-muted);
+  background: var(--color-surface-panel-alt);
+}
+
+.cee-patch-korg-card:hover .cee-device-card-out {
+  color: var(--color-text-secondary);
+}

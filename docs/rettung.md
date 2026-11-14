@@ -1,0 +1,353 @@
+# Rettung
+
+Stand: 9. November 2026. Die Seite "Blechy" im Editor (früher "Rettung", Adresse weiter `#rescue`) führt
+durch den Weg zurück, wenn das Gerät nach einem Update oder Patch nicht mehr richtig startet. Blechy fragt in
+Sprechblasen, was los ist. Die erste Antwort schreibst du in ein Feld, die passenden Fälle stehen beim Tippen
+darüber (Stichwörter in allen elf Sprachen, `src/blechy-match.mjs`, ohne Netz); danach sind die Antworten
+Knöpfe. Jeder Fall läuft Schritt für Schritt, das Stoppschild steht
+bei dem Fall, der es braucht. Sie sagt nur, was die Messungen und
+die Dokumentation belegen. Jeder Schritt trägt einen Marker: **gemessen** (am Gerät gesehen),
+**offline** (Code oder Emulator gelesen), **hergeleitet**, **offen** (nicht geprüft). Der Inhalt steht
+in `data/rescue.mjs`, die Seite in `site/app/rescue.mjs`, der Test in `test/e2e/rescue.e2e.mjs`.
+
+## Stoppschild
+
+Der Bootloader (Flash `[0, 0x20000)`) wird nie angefasst: der Editor sperrt ihn
+([Sperrliste](speicherbereiche.md#die-sperrliste-als-maschinenregel)) und kennt keinen Befehl, der
+Flash beschreibt. Hängt das Gerät, bevor eine Update-Abfrage kommt, beschreibt Hacktribe nur
+JTAG/OpenOCD als Weg, ein defekter Secondary Bootloader braucht eine eigene Wiederherstellung
+([Quellenprüfung](messungen/2026-10-08-firmware-rueckweg.md)). Dann wird nichts weiter ausprobiert.
+
+## Welche Datei in welchen Ordner
+
+Die Datei heißt immer `SYSTEM.VSB`.
+
+| Läuft gerade | Pfad auf der Karte | Stand |
+|---|---|---|
+| Hacktribe | `KORG/hacktribe/System/SYSTEM.VSB` | gemessen, am 10.10. hin und zurück geübt ([Rückweg geübt](messungen/2026-10-10-rueckweg-geuebt.md)) |
+| BLECHTRIBE | `KORG/blechtribe/System/SYSTEM.VSB` | gemessen: am 15.10. nahm eine laufende BLECHTRIBE am Gerät ihr Update aus dieser Datei ([Gerätetest](geraetetests/blech-datei.md)) |
+| Korgs Original (Sampler) | `KORG/electribe sampler/System/SYSTEM.VSB` | Pfad laut Hacktribe-Doku, am Gerät nicht geübt |
+| Korgs Original (Electribe 2) | `KORG/electribe/System/SYSTEM.VSB` | Pfad laut Hacktribe-Doku, am Gerät nicht geübt |
+| BLECHTRIBE auf der blauen (Synth-Satz oder mit Hacktribe) | `KORG/blechtribe/System/SYSTEM.VSB` | im Emulator gemessen ([Messung](messungen/2026-10-26-blech-hacktribe-blau.md)), am Gerät offen |
+
+**Hacktribe oder BLECHTRIBE mit Hacktribe auf der blauen, zurück zu Korgs Original:** Korgs blaue 2.02 nehmen und im Kopf zwei
+Bytes ändern: Byte `0x12` auf `0x53`, Byte `0x2E` auf `0x24` (das macht Hacktribes `e2-header.py DATEI sampler`). Die Datei
+als `SYSTEM.VSB` in den Ordner der laufenden Firmware legen (`KORG/hacktribe/System/` oder `KORG/blechtribe/System/`), dort
+nur diese Datei, dann SOFTWARE UPDATE. Unverändert sagt das Gerät "Error / Invalid File" und schreibt nichts. Im Emulator
+gemessen ([Messung](messungen/2026-10-26-blech-hacktribe-blau.md)), am Gerät offen. Korgs BLECHTRIBE-Synth-Satz (ohne Hacktribe)
+nimmt die unveränderte blaue Datei in `KORG/blechtribe/System/`.
+
+Diese Tabelle gilt für DATA UTILITY, SOFTWARE UPDATE in einer laufenden Firmware. Die Abfrage beim
+Einschalten (Fall 2) sucht woanders: sie richtet sich nach der Kennung des Geräts im Flash
+(`0x220000`), nicht nach der Firmware, die läuft.
+
+| Gerät (Kennung im Flash) | Es läuft | Abfrage beim Start sucht | Angenommen | Stand |
+|---|---|---|---|---|
+| rot, Sampler (`ele2sUSR`) | Korgs Synth-Firmware | `KORG/electribe sampler/System/SYSTEM.VSB` | jede Sampler-VSB: Korg, Hacktribe, BLECHTRIBE | offline (Emulator), Korg am Gerät bestätigt (23.10.) |
+| blau, Synth (`elec2USR`) | Korgs Sampler-Firmware | `KORG/electribe/System/SYSTEM.VSB` | Synth-VSB von Korg | offline (Emulator) |
+| Kennung fehlt oder kaputt | beliebig | `System/SYSTEM.VSB` an der Kartenwurzel | nichts: immer "Error, Invalid File" | offline (Emulator) |
+
+- **offline (Emulator):** In der Startabfrage findet die Firmware unter `KORG/hacktribe/System` und
+  `KORG/blechtribe/System` nichts ("Error, No File"). Dieselbe Hacktribe- oder BLECHTRIBE-VSB unter
+  `KORG/electribe sampler/System` nimmt sie an und schreibt sie.
+- **offline (Emulator):** Hacktribe und BLECHTRIBE nehmen beide Kennungen an und starten normal, auch auf
+  einem blauen Gerät. Bei ihnen kommt die Startabfrage also nur, wenn die Kennung fehlt, und dann
+  hilft keine Datei (Zeile 3).
+- **offline (Code):** Warum "Invalid File" an der Wurzel: ohne Kennung ist der Gerätetyp 0, der Ordner
+  dafür ist leer (`0xC0035720`), und der Typ im Kopf jeder VSB (`0x124` Sampler, `0x123` Synth, Byte
+  `0x2C` bis `0x2E`) passt nie zu 0 (Vergleich `0xC003AD80`).
+
+## Doom
+
+SHIFT + TAP beim Einschalten startet Doom von der Karte (Patch `doom-loader`, nur mit BLECHTRIBE aus dem Patcher
+und mit `doom.bin` unter `KORG/blechtribe/Doom/`, per Kartenleser oder auf der Seite Doom per USB). Der Rückweg ist kurz und liegt in der Firmware:
+
+- **Ohne SHIFT + TAP** startet der normale Sampler. Das ist im Emulator geprüft, am Gerät nicht.
+- **EXIT beim Einschalten** hält alle Patches heraus, auch den Lader: der Lader springt nur bei genau
+  SHIFT + TAP an. Im Emulator geprüft ([Doom auf BLECHTRIBE v21](messungen/2026-10-15-doom-v21.md)), am Gerät nicht.
+- **Ohne `doom.bin` und `doom.wad` auf der Karte** (oder ohne Karte) startet mit SHIFT + TAP der normale Sampler. Im
+  Emulator geprüft, am Gerät nicht.
+- **`DOOM ERROR` mit Code** (falsche Länge oder Prüfsumme, Karte nicht lesbar), **`DOOM STOP`** nach
+  QUIT DOOM und das laufende Spiel: Ein/Aus schaltet in Doom am Gerät bisher nicht aus (25.10.: 30 s gehalten, sie blieb
+  an). Netzteil ziehen oder Batterien raus, wieder einschalten ohne SHIFT + TAP. Die Karte nicht während des Zugriffs ziehen.
+- Der Bootloader und die Update-Wege bleiben unberührt. Das Update der Firmware geht wie sonst über den
+  Ordner oben, auch mit dem Lader darin.
+
+## Die vier Fälle
+
+1. **Das Gerät startet, aber etwas stimmt nicht.** EXIT, notfalls aus und mit gehaltenem EXIT wieder
+   an (Notschalter, am Gerät nur für den MFX-2-Patch bestätigt). Hilft EXIT, gilt das nur für diesen einen
+   Start. Die Seite fragt dann weiter: einmal ohne Karte normal einschalten (ohne Karte lädt der Plugin-Lader nichts
+   und die Einstellungen stehen auf den Vorgaben, siehe [Plugins](plugins.md)). Läuft sie so, `Plugin/e2sPlugin.all`
+   und `settings.a.bin`/`settings.b.bin` unter `KORG/blechtribe` umbenennen; das hält auch bei normalem Start.
+   Spinnt sie auch ohne Karte, oder hilft EXIT nicht: die gesicherte Original-Datei in
+   den Ordner oben legen, Prüfsumme auf der Karte nachlesen, DATA UTILITY, SOFTWARE UPDATE (FACTORY
+   RESET direkt davor nicht bestätigen), Abschluss abwarten. Das ist am 10.10. am Gerät geübt.
+2. **SOFTWARE UPDATE, press ENTER beim Einschalten.** Korgs Original-Firmware für den Sampler unter
+   `KORG/electribe sampler/System/SYSTEM.VSB` auf die Karte, einschalten, ENTER, Update durchlaufen lassen,
+   aus und wieder an. Am Gerät bestätigt (23.10.). Welcher Ordner, steht in der zweiten Tabelle oben.
+   Im Emulator (offline) Schritt für Schritt: Startbild, "SOFTWARE UPDATE / press ENTER", einmal ENTER
+   (am Panel die Taste MENU, Nachricht `0x09`), "Working...", dann "SOFTWARE UPDATE / OK. Please Reboot.",
+   aus und wieder an. Ohne Netzteil kommt nach ENTER "Warning / Battery Low" und nichts wird geschrieben.
+   Die Kartenwurzel aus der alten Emulator-Messung ist der Fall "Kennung fehlt": dort passt keine Datei.
+3. **Anzeige 00.** Das ist das Panel-Update: die Firmware fragt den Panel-Controller nach seiner Version,
+   erwartet `0x96` und schreibt sonst die Panel-Firmware aus der laufenden VSB neu; die Zahl ist der
+   Schritt (00 bis 12). Hintergrund: [Panel-Controller](hintergrund/panel-controller.md).
+   - **offline (Emulator):** Falsche Version: Startbild, leer, "Working...", nach rund 3,6 s "00" in einem
+     Rahmen. Keine Antwort: dasselbe, "00" nach rund 8,8 s. Antwortet das Panel im Update, läuft es bis
+     "Please Reboot"; antwortet es nicht, bleibt "00" stehen (60 s geprüft).
+   - **offline (Emulator):** Während "00" liest die Firmware die Karte nicht (0 Sektoren). Eine Datei auf
+     der Karte ändert an "00" nichts. Das Panel-Update kommt vor der Startabfrage aus Fall 2: mit falscher
+     Panel-Version und falscher Kennung zeigt das Gerät zuerst "00".
+   - **offline (Emulator, Bootloader):** Der Secondary Bootloader zeichnet nichts und sucht keine Datei.
+     Er liest 2 MiB ab Flash `0x20000` ohne Prüfung und springt hinein; mit gelöschtem oder genulltem
+     Abbild bleibt das Display leer, ohne "00". "00" kommt also immer aus der Firmware, nie aus dem
+     Bootloader.
+   - **Was tun (hergeleitet):** warten. Kommt "Please Reboot", aus und wieder an. Bleibt "00" stehen,
+     redet das Panel nicht mit der CPU; das Debrick-Wiki von Hacktribe nennt dafür das Flachbandkabel
+     zwischen Hauptplatine und Panel, nicht die Karte.
+   - **gemessen am Gerät (23.10.):** Nach einem Update auf Hacktribe blieb "00" stehen, sonst passierte
+     nichts, an "Please Reboot" erinnert sich der Nutzer nicht. Mit Korgs Sampler-Firmware unter
+     `KORG/electribe sampler/System/SYSTEM.VSB` kam beim nächsten Einschalten die Update-Abfrage, danach
+     startete es wieder.
+   - **offen:** Warum die Abfrage kam. Laut Emulator liest die Firmware während "00" die Karte nicht, und
+     Hacktribe nimmt beide Kennungen an. Ein Panel-Update, das hängen bleibt, und danach eine fehlende
+     oder kaputte Kennung würden passen; nicht geprüft.
+4. **Nichts, keine Abfrage.** Erst Netzteil und Batterien prüfen. Kommt dann weiter keine Abfrage, hilft
+   nach der Debrick-Anleitung von Hacktribe nur JTAG.
+
+## Welche Themen die Startseite zuerst zeigt
+
+Die Startseite zeigt neun Themen vor dem Rest (`FIRST_CASES` in `data/rescue.mjs`), geordnet nach dem, was im Discord
+am häufigsten gefragt wird. Grundlage: die Nachrichten von 96 Personen aus hilfe, fehler-melden, e2-people, es2-people,
+general, blechy-chat, plugins und effekte-basteln vom 25.10. bis 10.11.2026, nur gelesen. Gezählt sind Personen je
+Thema nach Stichwörtern, nicht von Hand sortiert: **geschätzt**, die Reihenfolge ist belastbarer als die Zahlen.
+
+| Thema im Discord | Personen | Thema auf der Startseite |
+|---|---|---|
+| Hacktribe, rot oder blau, Reihenfolge, was geht verloren | 36 | Hacktribe, rot oder blau |
+| Einstieg, Installation, SD-Karte, Ordner | 14 | Wie installiere ich BLECHTRIBE |
+| "No File" beim Update | 11 | Da steht Error und No File |
+| Test im Patcher rot oder abgestürzt | 10 | Der Test im Patcher wird rot |
+| "Invalid File" beim Update | 8 | Da steht Error und Invalid File |
+| Plugins und Effekte aufs Gerät | 8 | Wie funktionieren Plugins |
+| Hängt in der Startphase | 8 | Gar nichts: dunkel oder hängt am Logo |
+| App findet die Electribe nicht, MIDI | 7 | Die App findet meine Electribe nicht |
+| Samples weg nach Hacktribe | 5 | Meine Samples fehlen |
+
+Fragen zur Bedienung der App stehen darunter und kommen beim Tippen oder unter "Alle Themen zeigen": Installation und
+Patcher, Hacktribe, Plugins, Spiele wie Tetris, eigene Effekte, Emulator, eigene Samples (WAV), Updates, Einstellungen
+speichern (WRITE) und das Startbild. Weitere Zahlen derselben Auswertung: Emulator 10 Personen, WAV und Samples laden
+10, Update per USB oder SD 6, Einstellungen speichern 5, Spiele 5.
+
+Ein Fehler der App selbst öffnet Blechy bei dem Thema seiner Seite: der Emulator bei "Der Emulator läuft nicht", die
+Seiten Plugins, Baukasten, Samples, Design und der Patcher bei ihrem Thema, die Update-Meldung beim Thema Updates
+(`toastFor` in `site/app/toast.mjs`). Alles andere landet bei der allgemeinen Frage, was in der App hakt.
+
+## Ablauf der Seite
+
+Die Seite fragt jedes Ding einmal und trägt die Antwort weiter (`set`, `ask` und `toIf` in `data/rescue.mjs`, die
+Logik in `passSteps`). Jeder Fall am Gerät beginnt mit der Farbe (rot ist der Sampler, blau der Synth; "Weiß ich nicht"
+erklärt, wo man nachsieht). Eine angesteckte blaue wird ohne Rückfrage genommen; eine rote lässt die Seite bestätigen,
+weil sich eine blaue mit Hacktribe vielleicht als rote meldet (offen).
+
+- **Welche Datei zuletzt drauf kam** kommt vor der Frage nach dem Ordner: Korgs Update-Datei, Hacktribe, BLECHTRIBE oder
+  "Weiß ich nicht". Die Antwort ist nur ein Hinweis, die nächste Frage markiert sie ("Passt zu deiner letzten Datei"),
+  entschieden wird dort. "Weiß ich nicht" führt gleich zu allen Ordnern. Weiß die App schon etwas (laufendes BLECHTRIBE,
+  Ordner der letzten Patcher-Kopie), fällt die Frage weg (`passIf` in `data/rescue.mjs`).
+- **Was läuft gerade** wird dort gefragt, wo der Ordner auf der Karte gebraucht wird: Korgs Original, Hacktribe,
+  BLECHTRIBE oder "Weiß ich nicht". Läuft BLECHTRIBE an der angesteckten Electribe, übernimmt die App die Antwort. Bei
+  "Weiß ich nicht" wandert die Datei in alle drei Ordner (Korgs Ordner der Farbe, `hacktribe`, `blechtribe`); das schadet
+  nicht, weil das Update nur den Ordner der laufenden Firmware liest (im Emulator für alle acht Firmwares gemessen, am Gerät
+  offen: [Messung](messungen/2026-11-08-rettung-alle-ordner.md)).
+- **Der Ordner heißt nach der Firmware, die jetzt läuft**, nicht nach der, die man haben will. Die Seite zeigt den Pfad
+  als Baum (`KORG`, Ordner, `System`, `SYSTEM.VSB`) und sagt das dazu. Bei der Abfrage beim Einschalten sucht die
+  Firmware immer in Korgs Ordner der Kennung.
+- **Die Karte prüfen lassen** steht vor "Habe ich selbst geprüft". Ein zweites "Klappt nicht" oder "No File" bietet die
+  Prüfung noch einmal an, erst danach folgt die Frage, was das Display zeigt, und der Kontakt. Die Prüfung braucht einen
+  Computer; am Handy steht das dabei, und der Knopf fehlt.
+- **Korgs Datei** wird erst genannt, wenn klar ist, welche gebraucht wird, mit der Seite der Datei bei Korg (2.02) und dem
+  Namen der ZIP-Datei (`electribe_sampler_system_v202.zip`, `electribe_system_v202.zip`, die Seiten stehen in
+  `src-tauri/src/korg.rs`). Eine blaue mit Hacktribe, auch BLECHTRIBE mit Hacktribe, bekommt die Datei mit dem
+  Sampler-Kopf; die Seite nimmt sie in einem Upload-Feld wie im Patcher entgegen und geht erst nach einer gültigen Datei
+  weiter. Die Frage dazu lautet "Haken auch Hacktribe gesetzt?", "Weiß ich nicht" nimmt zuerst Korgs unveränderte Datei.
+- **MENU als Bild.** Wo die Seite MENU drücken lässt (Update im Menü, die Update-Frage beim Einschalten), zeigt sie die
+  Electribe als Strichzeichnung mit genau der Taste MENU gefüllt und den Tasten für den Weg (EDIT links und rechts) gestrichelt,
+  jede Markierung innerhalb ihrer Taste; die Bildunterschrift sagt, was gefüllt und was gestrichelt ist
+  (`e2Keys` in `site/app/e2-art.mjs`, Lage der sechs Tasten aus `panel.mjs` umgerechnet, `test/rescue.test.mjs` prüft beides).
+- **Der Chat folgt.** Jede neue Nachricht von Blechy scrollt mit ihren Antworten ins Bild, so weit beides passt; der Anfang
+  einer langen Nachricht bleibt unter der Leiste oben. Mit "Bewegung reduzieren" im System springt die Seite statt zu gleiten. Bei Korgs Datei zeigt ein Bildschirmfoto von Korgs
+  Seite die Zeile "System Updater 2.02" ganz unten, die zur ZIP-Datei führt (`site/img/rescue/`, aufgenommen am 08.11.2026;
+  ändert Korg die Seite, stimmt das Bild nicht mehr).
+- **Patterns und Samples** werden vor jedem Schreiben genannt: das Update schreibt nur die Firmware, Patterns im Gerät
+  blieben im Emulator erhalten (am Gerät offen), dazu der Link zur Pattern-Sicherung der App.
+- **Kein Ende ohne Hilfe.** "Gar nichts" nennt zuerst Netzteil und EXIT beim Einschalten (das hält BLECHTRIBEs Patches
+  heraus), "Es kommt keine Update-Frage" führt ins Menü oder zum Notausgang, "Klappt nicht" fragt nach dem Display, bei
+  00 steht das Flachbandkabel, und jeder Weg, der nicht endet, landet beim Kontakt. "Sie läuft wieder" ohne Datei sagt
+  nicht, es sei etwas zurückgespielt worden.
+- **Samples fehlen oder klingen falsch** ist ein Fall der ersten Frage und hinter "Sie startet, aber etwas spinnt" zu
+  erreichen. Ohne Hacktribe geht es zurück zur Prüfung der Firmware.
+
+Die Texte zu "No File" und "Invalid File" sagen zuerst, dass das Gerät heil ist und nur auf eine passende Datei wartet.
+
+## Fälle aus dem Hilfekanal nach dem 28.10.
+
+Gelesen bis 8.11., Stand der Meldungen, nichts davon am Gerät nachgestellt.
+
+- **Blau mit Hacktribe will BLECHTRIBE** (30.10., 3. bis 5.11.): erst "No File", dann "Invalid File", teils tagelang offen.
+  Der Weg: Karte, Firmware "Hacktribe" oder "BLECH", Korgs Datei mit dem Sampler-Kopf über das Upload-Feld.
+- **Invalid File war nach dem Neukopieren weg** (30.10.): jetzt der erste Schritt bei Invalid File.
+- **Alle vier Ordner ausprobiert, immer "No File"** (1. bis 7.11.): die Nutzer kennen den Ordner der Startabfrage nicht.
+  Die Seite nennt je Farbe einen Ordner als Baum und erklärt, dass er nach der laufenden Firmware heißt.
+- **EXIT hilft nicht, "Update-Bootloop"** (7.11.): kein Bootloop, "No File" heißt, es liegt keine Datei im Ordner.
+- **Samples nach BLECHTRIBE weg** (30.10., 6.11.): Hacktribe war mit angehakt; der Weg "Samples fehlen" fragt danach.
+- **Ordner `System` fehlt** (26. und 28.10.): steht in jedem Kartenschritt ("fehlende Ordner legst du einfach an").
+- **USB-Update schlägt fehl** (29.10. bis 5.11.): kein Fall der Rettung; der Weg über die Karte bleibt der Normalweg.
+
+## Hacktribe aus Versehen, Samples weg
+
+Der Fall "Ich hab aus Versehen Hacktribe installiert" der Seite (`samples` in `data/rescue.mjs`) geht drei Schritte. Was
+dahinter belegt ist und was offen bleibt, steht in der [Messung](messungen/2026-11-06-hacktribe-samples.md).
+
+1. Blechy sagt, dass nichts weg ist: die Werksklänge liegen im Flash des Geräts, eigene Samples als `e2sSample.all` im alten
+   Ordner der Karte. Hacktribe liest beides nur nicht. Mit einer Firmware ohne Hacktribe ist alles wieder da, solange Flash
+   und Sample-Datei nicht überschrieben wurden. Eine Frage nach einer Sicherung gibt es nicht mehr.
+2. Zurück zu BLECHTRIBE ohne Hacktribe: im Patcher bei der laufenden Firmware "Original" wählen (auch wenn Hacktribe drauf
+   ist) und als Ziel BLECHTRIBE, dann Korgs Original-Datei. Die fertige `SYSTEM.VSB` kommt in den Ordner der Firmware, die jetzt
+   läuft (`KORG/hacktribe/System/` oder `KORG/blechtribe/System/`), danach weiter wie bei "Welche Firmware läuft gerade". Der
+   Hinweis unter dem Pfad nennt nur den gezeigten Ordner.
+3. Ob das Update die Datei nimmt, hängt am Kopf (Tabelle unten). Die Datei aus dem Patcher trägt den Kopf von Korgs Original
+   ihrer Farbe: auf der roten den Sampler-Kopf, auf der blauen den blauen. Läuft auf der blauen Hacktribe, allein oder in
+   BLECHTRIBE, sagt das Update dazu "Invalid File"; dann geht es über den Schritt der Seite, der Korgs blaue Datei mit dem
+   Sampler-Kopf speichert (`back:head`), danach BLECHTRIBE im Patcher. Bei BLECHTRIBE auf der blauen fragt die Seite, ob Hacktribe
+   mit drin ist, die App kann das nicht lesen; "Weiß ich nicht" nimmt den Weg über `back:head`, weil fehlende Samples auf
+   Hacktribe zeigen. Passt der Kopf nicht, schreibt das Update nichts (gemessen im Emulator, alle acht Firmwares).
+
+| Farbe | Läuft | Datei aus dem Patcher (Original, Ziel BLECHTRIBE) | Weg der Seite | Stand |
+|---|---|---|---|---|
+| rot | Korgs Original, Hacktribe, BLECHTRIBE, BLECHTRIBE mit Hacktribe | genommen | Patcher | gemessen im Emulator für Korgs rote und BLECHTRIBE mit Sampler-Kopf in allen vier ([Messung](messungen/2026-11-08-rettung-alle-ordner.md)); für BLECHTRIBE aus Korgs roter hergeleitet: gleicher Kopf wie Korgs rote |
+| blau | Korgs Original | genommen | Patcher | gemessen im Emulator ([Messung](messungen/2026-10-26-blech-hacktribe-blau.md), BLECHTRIBE-Synth-Satz aus `KORG/electribe/System/`) |
+| blau | BLECHTRIBE ohne Hacktribe | genommen | Frage, dann Patcher | gemessen im Emulator für Korgs blaue unverändert; für den BLECHTRIBE-Synth-Satz hergeleitet: gleicher Kopf |
+| blau | Hacktribe | "Invalid File" | `back:head` | gemessen im Emulator (beide Messungen) |
+| blau | BLECHTRIBE mit Hacktribe | "Invalid File" | Frage, dann `back:head` | gemessen im Emulator (beide Messungen) |
+| blau | weiß nicht | je nach Firmware | `back:head` | hergeleitet |
+
+Am Gerät ist keine Zeile dieser Tabelle geprüft.
+
+Vor dem Patchen mit Hacktribe zeigt der Patcher die Warnung samt Haken (`cee-patch-ht-ack`); ohne den Haken geht Weiter,
+Patchen und Speichern nicht.
+
+## Meldungen beim Update und Ärger mit der App
+
+Neben den vier Fällen fragt die Seite nach "Error, Invalid File", "Error, No File" und nach Ärger mit der App. Die
+Fälle kommen aus dem Discord (25. bis 28.10.); dort ist auch der erste Gerätefall zu "Invalid File" beschrieben.
+
+**Error, Invalid File.** Die Firmware hat eine Datei gefunden, die nicht passt, und schreibt nichts (offline, Emulator,
+siehe oben). Die Seite fragt, wann die Meldung kommt:
+
+- **Beim Einschalten, nach press ENTER:** Farbe, bei der blauen dann "War jemals Hacktribe drauf?". Nein oder weiß
+  nicht: Korgs blaue Datei unter `KORG/electribe/System/SYSTEM.VSB`. Ja: Korgs Datei für die rote (Sampler) unter
+  `KORG/electribe sampler/System/SYSTEM.VSB`. Grund (hergeleitet): Die Startabfrage folgt der Kennung im Flash, und
+  eine blaue, auf der Hacktribe lief, kann die Sampler-Kennung tragen; dann gilt Zeile 1 der zweiten Tabelle oben.
+  Am Gerät: eine blaue, vorher Hacktribe, zurück auf Korgs Synth-Firmware, dann BLECHTRIBE, hing in der Schleife
+  "SOFTWARE UPDATE / press ENTER", ENTER, "Error / Invalid File" mit Korgs blauer Datei unter `KORG/electribe/`
+  (gemessen, Videos im Discord, 28.10.). Mit einer Sampler-Datei bzw. einem anderen Ordner ging es weiter; welcher der
+  beiden Wege es war, ist offen. Dass Korgs Sampler-Firmware danach auf der blauen normal läuft, ist hergeleitet.
+- **Im Menü bei SOFTWARE UPDATE:** Datei aus dem Patcher: meist für die andere Electribe gepatcht (Discord, 27.10.,
+  rote mit Korgs Original, im Patcher die blaue gewählt); neu patchen mit der richtigen Farbe, der Patcher nennt die
+  Farbe selbst, wenn die Electribe angesteckt ist (`patcher.device.cable.*`, offline, Code). Korgs Datei: rot und blau
+  ohne Hacktribe gehen den Weg über den Ordner der laufenden Firmware; blau mit Hacktribe braucht die zwei Kopf-Bytes
+  aus dem Absatz oben. Die Seite macht die Datei aus Korgs blauer `SYSTEM.VSB` (nur die von Korg, jede andere
+  lehnt sie ab; `korgBlueForSampler` in `src/patcher.mjs`). Der ganze Weg mit Belegen: [Zurück zu Korgs Original](original-zurueck.md).
+
+**Error, No File.** Dort, wo die Firmware sucht, liegt keine Datei mit genau diesem Namen. Beim Einschalten geht die
+Seite den Weg über die Farbe wie bei "Invalid File". Im Menü nennt sie die Stellen, an denen es im Discord hing
+(gemessen, Chat und Fotos, vier Fälle):
+
+- Der Name ist genau `SYSTEM.VSB`. Der Patcher speichert über einen Download mit diesem Namen
+  (`site/app/save-file.mjs`); liegt im Download-Ordner schon eine, nennt der Browser die neue `SYSTEM (1).VSB`
+  (gemessen, Foto). Dass genau das "No File" auslöste, ist hergeleitet, im Fall fehlte auch der Ordner `System`.
+- Die Datei liegt im Unterordner `System`, fehlt er, wird er angelegt.
+- Kein Ordner wird umbenannt. `KORG/blechtribe/` nimmt die Firmware erst, wenn BLECHTRIBE läuft; vor dem ersten Update gehört
+  die Datei in den Ordner der laufenden Firmware (Tabelle oben). Ein Ordner, der vor dem ersten Flash in `blechtribe`
+  umbenannt wurde, führte zu "No File" (gemessen, Discord).
+- Im Patcher die richtige Electribe: für die rote und die blaue nennt er verschiedene Ordner (`folderOf`, offline, Code).
+
+Danach fragt die Seite, welche Firmware läuft, und legt die Datei in deren Ordner.
+
+**Blechy schaut auf die Karte.** Wo die Seite den Zielpfad nennt (`card:*` und `nofile:folder:*`), bietet sie "Schau dir
+meine SD-Karte an" an. Gewählt wird der oberste Ordner der Karte, nicht die Datei. Die Seite sucht jede `.VSB` bis sechs
+Ordner tief (ohne `._`-Dateien und Systemordner), liest nur Dateien mit genau 2.097.408 Bytes und erkennt am Kopf
+(`headOf` in `src/card-check.mjs`), ob sie für die rote (Sampler) oder die blaue ist, an der SHA-256, ob Blechy sie
+kennt. Gemeldet werden falscher Name (`SYSTEM (1).VSB`, `SYSTEM.VSB.VSB`), andere Schreibweise, falscher Ordner,
+falsche Größe, unbekannter Kopf und die Datei der anderen Electribe (offline, Code). Für `blechtribe` gilt jeder der zwei
+Köpfe, auf einer angesteckten roten nur der Sampler-Kopf.
+
+Nach einem Klick verschiebt Blechy die passende Datei an den Zielpfad. Er löscht nie etwas: liegt dort schon eine
+Datei, heißt sie danach `SYSTEM.VSB.old` (oder `.old2` usw.), und er sagt es. Ordner vergleicht er ohne Groß- und
+Kleinschreibung, eine reine Änderung der Schreibweise geht über einen freien Zwischennamen. Dass FAT dabei Groß- und
+Kleinschreibung nicht unterscheidet, ist hergeleitet. Wo die Karte steckt:
+
+- App: der Ordnerdialog und jedes Lesen und Verschieben laufen in der App (`src-tauri/src/card.rs`), nur innerhalb des
+  gewählten Ordners, ohne `..` und ohne Links zu folgen; ein belegtes Ziel lehnt sie ab.
+- Chrome und Edge: `showDirectoryPicker` mit Schreibrecht. Ohne `move()` am Datei-Handle kopiert die Seite, das
+  Original bleibt liegen, und Blechy sagt das.
+- Safari und Firefox: nur lesen (`webkitdirectory`). Blechy zeigt dieselben Schritte, die Person führt sie selbst aus.
+
+**Die App findet die Electribe nicht.** Die Seite liest den MIDI-Bericht der App selbst (`midiVerdict` in
+`site/app/midi-report.mjs`, ohne den Browser zu fragen) und den Modus oben in der App:
+
+| Bericht | Die Seite sagt | Stand |
+|---|---|---|
+| Ports, die auf ` PAD/KNOB` oder ` SOUND` enden, unter Windows | Korgs USB-MIDI-Treiber entfernen, Windows' eigener reicht (Wortlaut wie `settings.midi.korgDriver`) | gemessen (Windows, 28.10.) |
+| dieselben Ports auf einem anderen System | noch nicht geprüft, MIDI-Bericht ins Discord, keine Ursache genannt | offen (Mac) |
+| eine Electribe erkannt, Modus Emulator | oben "Echtes Gerät" wählen; nur dort verbindet die App, auch automatisch | offline (Code), Fall im Discord gelöst |
+| eine Electribe erkannt, Modus Echtes Gerät | "Mit Electribe verbinden", automatisches Verbinden in den Einstellungen | offline (Code) |
+| ein Port mit "electribe", aber kein Paar | MIDI-Bericht ins Discord | offen |
+| kein Port mit "electribe" | einschalten, Datenkabel, anderer USB-Anschluss | hergeleitet |
+| Zugriff abgelehnt oder kein Web MIDI | Zugriff erlauben, bzw. die App oder ein Browser mit Web MIDI | offline (Code) |
+
+Kann die Seite nichts lesen (Web MIDI noch nicht erlaubt), fragt sie nach dem Modus und nach den Namen im Bericht.
+
+**Export oder Import zeigt alte Patterns.** Kein Fehler in BLECHTRIBE ([Messung](messungen/2026-10-28-pattern-export.md)):
+EXPORT PATTERN schreibt das gespeicherte Pattern, also erst WRITE; Exporte liegen in `KORG/blechtribe/`, der alte Ordner
+bleibt nach der Übernahme mit den alten Kopien stehen, auf der blauen gibt es keine Übernahme und `KORG/electribe/`
+bleibt; Gerätedateien tragen immer den 01.01.2014.
+
+**Der Test im Patcher wird rot oder läuft nicht.** Auf das Gerät kommt dann nichts. Blechy fragt, was der Patcher
+meldet, in fünf Gruppen (`testGroup` und `testFailure` in `data/rescue.mjs`, die Kennungen aus `tools/emu/check.py`):
+
+| Gruppe | Kennungen | Was es heißt |
+|---|---|---|
+| Patchen | kein Bericht, `patcher.patch.failed` (`src/patch.mjs`) | An einer Patch-Stelle stehen andere Bytes als in Korgs 2.02 oder Hacktribe 2.02 |
+| Start | `header`, `dsp_stream`, `start_phase` | Ein Patch hat etwas geändert, das beim Einschalten läuft |
+| Rettungswege | `boot:*`, `update_offer`, `panel_update`, `start_mode:*`, `kill_switch`, `dsp_boot_once` | Der Start oder ein Rettungsweg geht nicht mehr |
+| Funktion | Kennung mit Präfix eines Fall-Moduls, `menu:`, `pswitch:` usw. (`TEST_AREAS`) | Ein Fall von BLECHTRIBE ist rot |
+| Lauf | der Emulator startet nicht oder antwortet nicht | Die Datei kann nichts dafür |
+
+Bei den ersten vier ist der Rat derselbe: als Eingabe eine normale Firmware nehmen, Korgs Original 2.02 oder Hacktribe
+2.02, und den Test wiederholen. Der Patcher meldet seinen letzten roten Test an die Seite (`onTest`), Blechy markiert
+dann die passende Gruppe mit "Sagt die App". Bleibt eine Funktion mit normaler Firmware rot, geht es weiter wie früher
+bei der vollen Prüfung: Vor App 1.3.7 scheitern die Fälle der Patches an Patterns, die im Emulator gespeichert sind; ab
+1.3.7 laufen sie auf einem leeren Flash (`tools/emu/check.py`, `test/emulator-check-flash.test.mjs`). Die Seite liest die
+Version der App: darunter, oder im Browser ohne Version, nennt sie `~/.gelumpe/flash/flash.bin` zum Umbenennen; sonst und
+danach bittet sie um `~/.gelumpe/emu.log`.
+
+**Blechy fragen in jeder Fehlermeldung.** Jeder Fehler-Toast der App (`site/app/toast.mjs`) hat den Knopf "Blechy
+fragen". Er öffnet diese Seite, Blechy zitiert die Meldung und springt zur passenden Stelle: ein roter Test zu seiner
+Gruppe, eine nicht gefundene Electribe zu "Die App findet sie nicht", alles andere zur Frage, was in der App hakt.
+
+**Was die Seite aus der App liest.** Nur, was die App ohnehin hat, nichts wird am Gerät neu gelesen oder geraten:
+die Farbe der angesteckten Electribe (`Session.hardware()`, wie im Patcher), ob dort BLECHTRIBE läuft (BLECH INFO beim
+Verbinden), den Ordner der letzten Datei aus dem Patcher (bis die App geschlossen wird), den MIDI-Bericht und die
+Version der App. Bei Farbe und Ordner sagt Blechy, was die App weiß, und markiert die passende Antwort mit "Sagt die
+App"; wählen muss die Person selbst. Die Farbe aus `hardware()` folgt der Kennung im Flash; ob eine blaue mit Hacktribe
+sich dort als rote meldet, ist offen.
+
+Die Seite spricht mit Leuten, die das Gerät kaum kennen und gerade Angst um es haben: Blechy erklärt
+in Alltagssprache, nur die Antworten. Belege stehen hier in der Doku, auf der Seite steht nur eine offizielle Quelle, wo es eine gibt (Debrick-Anleitung von Hacktribe). Was nur zu lesen ist,
+folgt nach einer Sekunde von selbst; Knöpfe gibt es nur, wo man etwas tun oder beantworten muss.
+
+Alle Rettungswege liegen in der Firmware selbst. Eine Firmware, die vor ihnen hängt, ist ohne JTAG
+nicht zu retten ([Patcher](patcher.md), "Startablauf und warum er tabu ist"). Offen bleibt die
+Rettung am Gerät ([Offene Messungen](ideen/offene-messungen.md)).

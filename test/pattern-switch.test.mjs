@@ -1,0 +1,183 @@
+import { describe, test } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { run as exec, slots } from "./support/spawn.mjs";
+import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import { applyPatches, PATCH_FORMAT, fromHex } from "../src/patch.mjs";
+import { checkHooks } from "../src/hooks.mjs";
+import { identify } from "../src/firmware.mjs";
+
+// The pattern switch (docs/ideen/46-patternwechsel-bestaetigung.md).
+const read = path => JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
+const PATCH = read("../data/patches/pattern-switch.json");
+const OTHERS = ["splash-editor", "mfx-switch", "script-runtime", "blechtribe", "blech-theme"].map(id => read(`../data/patches/${id}.json`));
+const CODE = 0x180100;              // file offset of 0xC0180000
+const CODE_END = 0x181000;          // 0xC0180F00
+// the replaced words: wheel branch, pad and MIDI first instruction, MENU and EXIT slots (pointers), sequence end call, STOP first instruction, label load,
+// stopped sync, the load's copy, the pad handler's busy check, the command runner's busy clear, the info line's label flag read, the part mute getter,
+// the main screen's call of the part mute setter, the mode keys' read of SHIFT at PART MUTE, the LED tick's counter clear
+const WORDS = [[0x6523c, 0xea, 0xc006513c], [0x6eee4, 0xea, 0xc006ede4], [0x6ef00, 0xea, 0xc006ee00], [0xe35b0, null, 0xc00e34b0],
+  [0xe35a0, null, 0xc00e34a0], [0x5f2c4, 0xeb, 0xc005f1c4], [0x81c5c, 0xea, 0xc0081b5c], [0x86ec4, 0xeb, 0xc0086dc4], [0x81f18, 0xea, 0xc0081e18],
+  [0x4ad44, 0xeb, 0xc004ac44], [0x44988, 0xea, 0xc0044888], [0x2d91c, 0xeb, 0xc002d81c],
+  [0x79ce0, 0xeb, 0xc0079be0], [0x79d2c, 0xeb, 0xc0079c2c], [0x98d84, 0xeb, 0xc0098c84],
+  [0x79c90, 0xeb, 0xc0079b90], [0x45eac, 0xea, 0xc0045dac],
+  [0x4a828, 0xeb, 0xc004a728], [0x4a8a8, 0xeb, 0xc004a7a8], [0x493f4, 0xeb, 0xc00492f4], [0x5a984, 0xeb, 0xc005a884], [0x8694c, 0xea, 0xc008684c],
+  [0x48dfc, 0xea, 0xc0048cfc], [0x60e34, 0xeb, 0xc0060d34], [0x7052c, 0xea, 0xc007042c], [0x8784c, 0xeb, 0xc008774c]];
+const VIEW_CODE = 0x173580;         // file offset of 0xC0173480, the view's pads, up to the SysEx table at 0xC0173800
+const BLINK_CODE = 0x177b00;        // file offset of 0xC0177A00, the blink of the view's pads, up to 0xC0177E00
+
+const local = process.env.E2_LOCAL_REQUIRED === "1" || process.env.E2_EMU_REQUIRED === "1";
+const vsb = process.env.E2_VSB;
+const flash = (process.env.E2_FLASH || "").split(delimiter).filter(Boolean);
+const dir = fileURLToPath(new URL("../tools/", import.meta.url));
+const venv = fileURLToPath(new URL(process.platform === "win32" ? "../tools/emu/.venv/Scripts/python.exe" : "../tools/emu/.venv/bin/python", import.meta.url));
+const python = () => process.env.E2_EMU_PYTHON || (existsSync(venv) ? venv : "python3");
+const skip = !vsb ? "E2_VSB not set" : false;
+const skipEmu = skip || (!local ? "emulation only runs in test:local or test:emu" : false);
+const flashArgs = flash.length ? ["--flash", ...flash] : [];
+
+test("the pattern switch declares the observers and pattern load hooks that run at start", () => {
+  assert.equal(PATCH.format, PATCH_FORMAT);
+  assert.equal(PATCH.version, 1);
+  assert.equal(PATCH.id, "pattern-switch");
+  for (const change of PATCH.changes) {
+    assert.match(change.expect, /^[0-9a-f]{64}$/, `${change.note}: expect`);
+    assert.ok(change.note);
+    assert.equal(change.copy, undefined, "nothing of the firmware is copied");
+  }
+  const symbol = name => PATCH.startPhase.find(s => s.why.startsWith(name));
+  assert.deepEqual(PATCH.startPhase.map(s => s.file).filter(f => f < 0x180100), [0x79c90, 0x79ce0, 0x45eac, 0x4a828, 0x4a8a8, 0x493f4, 0x5a984, 0x79d2c, 0x98d84, 0x81f18, 0x4ad44, 0x2d91c, 0x8694c, 0x48dfc, 0x8784c, BLINK_CODE, VIEW_CODE]);
+  assert.ok(PATCH.startPhase.some(s => s.why.includes("sync_hook")) && symbol("copy_hook") && symbol("pad_replay"), "the three code spans are declared (pad_replay and sync_hook as one)");
+  assert.ok(PATCH.startPhase.every(s => s.why.length > 20));
+});
+
+test("four ARM code areas and twenty-six declared hooks stay within their bounds", () => {
+  assert.equal(PATCH.changes.length, 4 + WORDS.length);
+  const view = PATCH.changes.find(c => c.file === VIEW_CODE);
+  assert.ok(view && view.file + fromHex(view.bytes).length <= 0x173900);
+  const blink = PATCH.changes.find(c => c.file === BLINK_CODE);
+  assert.ok(blink && blink.file + fromHex(blink.bytes).length <= 0x177f00);
+  const code = PATCH.changes.find(c => c.file === CODE);
+  const tail = PATCH.changes.find(c => c.file === 0x181040);
+  assert.ok(tail && tail.file + fromHex(tail.bytes).length <= 0x181100);
+  const n = fromHex(code.bytes).length;
+  assert.ok(code.file === CODE && code.file + n <= CODE_END, `${n} bytes`);
+  for (const [file, opcode, address] of WORDS) {
+    const change = PATCH.changes.find(c => c.file === file);
+    assert.ok(change, `hook at 0x${address.toString(16)}`);
+    const word = Buffer.from(fromHex(change.bytes)).readUInt32LE(0);
+    const target = opcode === null ? word : address + 8 + (((word & 0xffffff) << 8) >> 8) * 4;
+    if (opcode !== null) assert.equal(word >>> 24, opcode, `0x${address.toString(16)} branches${opcode === 0xeb ? " and links" : ""}`);
+    assert.ok([code, tail, view, blink].some(c => target >= 0xc0000000 + c.file - 0x100
+      && target < 0xc0000000 + c.file - 0x100 + fromHex(c.bytes).length), `0x${address.toString(16)} goes into our code`);
+  }
+  assert.deepEqual(PATCH.hooks.map(h => h.site).sort(), WORDS.map(([, , a]) => `0x${a.toString(16).toUpperCase()}`).sort());
+  const res = checkHooks([PATCH]);
+  assert.equal(res.ok, true, res.reasons.join(" "));
+});
+
+test("it sits clear of every other patch of the set and is accepted with all of them", async () => {
+  const spans = [...OTHERS, PATCH].flatMap(p => (p.changes ?? []).map(c => [c.file, c.file + (c.bytes ? c.bytes.length / 2 : c.copy.length), p.id])).sort((a, b) => a[0] - b[0]);
+  for (let i = 1; i < spans.length; i++) assert.ok(spans[i][0] >= spans[i - 1][1], `${spans[i - 1][2]} and ${spans[i][2]} overlap`);
+  const res = checkHooks([...OTHERS, PATCH]);
+  assert.equal(res.ok, true, res.reasons.join(" "));
+});
+
+test("the assembler and the patch builder agree with the committed patch", { skip }, () => {
+  const run = spawnSync(python(), [join(dir, "patch/pattern_switch.py"), "--vsb", vsb], { encoding: "utf8", timeout: 60_000 });
+  assert.ifError(run.error);
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.stdout), PATCH, "rebuild with tools/patch/pattern_switch.py --vsb SYSTEM.VSB --out data/patches/pattern-switch.json");
+});
+
+test("the native voice guard scopes preservation to one playing group load on all builds", async () => {
+  const run = await exec(python(), ["-m", "unittest", "discover", "-s", join(dir, "patch"), "-p", "test_sync_voices.py"],
+    { timeout: 60_000 });
+  assert.ifError(run.error);
+  assert.equal(run.status, 0, run.stderr || run.stdout);
+});
+
+test("applied to the own firmware it changes only what it names, alone and with the other patches", { skip }, async () => {
+  const original = new Uint8Array(readFileSync(vsb));
+  const res = await applyPatches(original, [PATCH]);
+  assert.equal(res.ok, true, res.reasons.join(" "));
+  assert.equal((await identify(res.bytes)).known, true);
+  const named = PATCH.changes.map(c => [c.file, c.bytes.length / 2]);
+  for (let i = 0; i < original.length; i++) {
+    if (original[i] !== res.bytes[i]) assert.ok(named.some(([at, n]) => i >= at && i < at + n), `0x${i.toString(16)} changed without being named`);
+  }
+  assert.deepEqual(res.allowCode, PATCH.startPhase.map(s => [s.file, s.length]), "only the start spans the patch declares");
+  const all = await applyPatches(original, [...OTHERS, PATCH]);
+  assert.equal(all.ok, true, all.reasons.join(" "));
+});
+
+describe("the pattern switch in the emulator", { concurrency: slots }, () => {
+  test("emulate:2026-10-15/patternwechsel, browse, confirm, EXIT, STOP, chain and the stock cases", { skip: skipEmu }, async () => {
+    const patched = await patchedCopy([PATCH]);
+    try {
+      const run = await exec(python(), [join(dir, "emu/pswitch_cases.py"), "cases", "--patched", patched.path, ...flashArgs], { timeout: 1_800_000, maxBuffer: 4 * 1024 * 1024 });
+      assert.ifError(run.error);
+      const report = JSON.parse(run.stdout);
+      assert.deepEqual(report.filter(c => !c.ok), []);
+      for (const id of ["browse_is_silent", "browse_label_is_view", "confirm_switches_at_sequence_end", "exit_takes_browse_back", "exit_takes_confirmation_back", "stopped_is_stock",
+        "stop_drops_browse", "chain_runs_while_browsing", "pad_wins_over_browse", "exit_held_is_stock", "no_card_is_stock", "setting_off_is_stock", "pad_flicker_playing", "pad_flicker_stopped_unsaved"]) {
+        assert.ok(report.some(c => c.id === `pswitch:${id}`), id);
+      }
+      assert.equal(run.status, 0);
+    } finally {
+      patched.remove();
+    }
+  });
+
+  test("emulate:2026-10-15/patternwechsel, with MFX 2 in the copy browsing leaves the effect alone and the change brings MFX 2 for the new pattern", { skip: skipEmu }, async () => {
+    const patched = await patchedCopy([read("../data/patches/mfx-switch.json"), PATCH]);
+    try {
+      const run = await exec(python(), [join(dir, "emu/pswitch_cases.py"), "cases", "--patched", patched.path, "--only", "9", ...flashArgs], { timeout: 900_000, maxBuffer: 4 * 1024 * 1024 });
+      assert.ifError(run.error);
+      const report = JSON.parse(run.stdout);
+      assert.deepEqual(report.filter(c => !c.ok), []);
+      assert.ok(report.some(c => c.id === "pswitch:mfx2_combined"));
+      assert.equal(run.status, 0);
+    } finally {
+      patched.remove();
+    }
+  });
+
+  test("emulate:2026-10-15/patternwechsel, the export check passes with the patch alone and starts nowhere before the rescue paths", { skip: skipEmu }, async () => {
+    const patched = await patchedCopy([PATCH]);
+    try {
+      const run = await exec(python(), [join(dir, "emu/check.py"), "--base", vsb, "--patched", patched.path, ...flashArgs], { timeout: 1_800_000, maxBuffer: 8 * 1024 * 1024 });
+      assert.ifError(run.error);
+      const report = JSON.parse(run.stdout);
+      assert.deepEqual(report.checks.filter(c => !c.ok), []);
+      assert.ok(report.checks.some(c => c.id === "pswitch:browse_is_silent"), "the patch's own cases ran");
+      assert.equal(run.status, 0);
+    } finally {
+      patched.remove();
+    }
+  });
+});
+
+test("the BLECH menu writes the word the pattern switch reads, and keeps OFF as bit 2 of the settings flags", () => {
+  const menu = readFileSync(new URL("../tools/patch/script_menu.s", import.meta.url), "utf8");
+  const builder = readFileSync(new URL("../tools/patch/pattern_switch.py", import.meta.url), "utf8");
+  const word = menu.match(/^\.equ PS_SETTING, (0x[0-9A-Fa-f]+)/m);
+  assert.ok(word, "script_menu.s names PS_SETTING");
+  const state = builder.match(/^STATE = (0x[0-9A-Fa-f]+)/m)[1];
+  assert.equal(parseInt(word[1], 16), parseInt(state, 16) + 0x10, "STATE + S_SETTING of tools/patch/pattern_switch.py");
+  assert.match(menu, /orreq r0, r0, #4\n(?:[^\n]*\n){0,40}?\s+mov r10, r0\n(?:[^\n]*\n){0,20}?\s+str r10, \[r7, #12\]/, "OFF is bit 2 of the flags");
+});
+
+function patchedCopy(patches) {
+  const original = new Uint8Array(readFileSync(vsb));
+  const directory = mkdtempSync(join(tmpdir(), "gelumpe-pswitch-"));
+  const path = join(directory, "SYSTEM.VSB");
+  return applyPatches(original, patches).then(res => {
+    assert.equal(res.ok, true, res.reasons.join(" "));
+    writeFileSync(path, res.bytes);
+    return { path, allowCode: res.allowCode, remove: () => rmSync(directory, { recursive: true, force: true }) };
+  });
+}

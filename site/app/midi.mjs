@@ -1,0 +1,154 @@
+import { t } from "./i18n.mjs";
+import { electribePorts } from "../../src/session.mjs";
+const ELECTRIBE = /electribe/i;
+
+/** The browser transport and the desktop's native MIDI commands share the same port shape. */
+export function createMidiTransport(scope = globalThis, { sendTimeout = bytes => 3000 + bytes * 0.4 } = {}) {
+  const native = scope.__GELUMPE_APP?.nativeMidi === true;
+  const active = new Set();
+  const api = () => {
+    const core = scope.__TAURI__?.core;
+    if (!core?.invoke || !core.Channel) throw new Error(t("midi.nativeMissing"));
+    return {
+      Channel: core.Channel,
+      async invoke(command, args) {
+        try { return await core.invoke(command, args); }
+        catch (reason) {
+          if (reason instanceof Error) throw reason;
+          const error = new Error(reason?.message ?? String(reason));
+          if (reason?.code) error.code = reason.code;
+          throw error;
+        }
+      },
+    };
+  };
+  const closePort = async (port, { refresh = true } = {}) => {
+    if (!native) {
+      active.delete(port);
+      if (port?.in) port.in.onmidimessage = null;
+      await Promise.all([port?.in?.close?.(), port?.out?.close?.()]);
+      return;
+    }
+    const entry = port?.out?._native;
+    if (!entry) return;
+    if (entry.closed) {
+      if (entry.closingPending) return entry.closing;
+      const result = await entry.closing;
+      if (!refresh || result?.state !== "quarantined") return result;
+      if (entry.closingPending) return entry.closing;
+    }
+    entry.closed = true;
+    active.delete(port);
+    port.in.onmidimessage = null;
+    port.in.state = port.out.state = "disconnected";
+    entry.closingPending = true;
+    entry.closing = (entry.sessionId ? api().invoke("midi_close", { sessionId: entry.sessionId }) : Promise.resolve({ state: "closed" }))
+      .finally(() => { entry.closingPending = false; });
+    return entry.closing;
+  };
+  const disconnect = async (port, error) => {
+    let result;
+    try { result = await closePort(port); } catch {}
+    const quarantined = result?.state === "quarantined";
+    const message = error?.message ?? (typeof error === "string" ? error : t("midi.disconnected"));
+    port.out._native.access.onstatechange?.({
+      port: port.out, code: error?.code, quarantined,
+      message: quarantined ? t("midi.quarantined", { message }) : message,
+    });
+  };
+  return {
+    native,
+    get supported() { return native || !!scope.navigator?.requestMIDIAccess; },
+    async requestAccess() {
+      if (!native) return scope.navigator.requestMIDIAccess({ sysex: true });
+      const ports = await api().invoke("midi_list");
+      const byId = list => new Map(list.map(port => [port.id, port]));
+      const twice = (list, name) => list.filter(port => port.name === name).length > 1;
+      const outputs = ports.outputs.filter(port => ELECTRIBE.test(port.name));
+      for (const output of outputs) {
+        if (twice(outputs, output.name) || twice(ports.inputs, output.name)) throw new Error(t("midi.ambiguous", { name: output.name }));
+      }
+      const access = { inputs: new Map(), outputs: new Map(), onstatechange: null };
+      // The same pairing as the browser path: Korg's driver names the ports after the jacks, Windows numbers them.
+      for (const { out: output, in: input } of electribePorts({ inputs: byId(ports.inputs), outputs: byId(outputs) })) {
+        const entry = { inputId: input.id, outputId: output.id, access, sessionId: null, closed: true };
+        access.inputs.set(input.id, { id: input.id, name: input.name, state: "connected", onmidimessage: null });
+        access.outputs.set(output.id, { id: output.id, name: output.name, state: "connected", _native: entry });
+      }
+      return access;
+    },
+    /** Native only: every port the system lists, also the ones requestAccess leaves out, for the MIDI report. */
+    async listPorts() { return api().invoke("midi_list"); },
+    async openPort(port) {
+      if (!native) {
+        try { await Promise.all([port.in?.open?.(), port.out.open?.()]); }
+        catch (error) { await closePort(port); throw error; }
+        active.add(port);
+        return port;
+      }
+      const entry = port.out._native;
+      if (!entry || !entry.closed) throw new Error(t("midi.portBusy"));
+      entry.sessionId = null;
+      entry.closing = null;
+      const { invoke, Channel } = api();
+      const events = new Channel();
+      const early = [];
+      let opening = true;
+      const current = event => !entry.closed && event.sessionId === entry.sessionId;
+      const failActive = async (event, error) => {
+        if (current(event)) await disconnect(port, error);
+      };
+      const consume = async event => {
+        try {
+          if (!current(event)) return;
+          if (event.type === "message") {
+            const bytes = await invoke("midi_read", { sessionId: event.sessionId, sequence: event.sequence });
+            if (current(event)) port.in.onmidimessage?.({ data: Uint8Array.from(bytes) });
+          } else if (event.type === "disconnected" || event.type === "error") {
+            await disconnect(port, event);
+          }
+        } catch (error) { await failActive(event, error); }
+        finally {
+          if (event.type === "message") {
+            try { await invoke("midi_ack", { sessionId: event.sessionId, sequence: event.sequence }); }
+            catch (error) { await failActive(event, error); }
+          }
+        }
+      };
+      let delivery = Promise.resolve();
+      const enqueue = event => {
+        if (event.type !== "message") return consume(event);
+        delivery = delivery.then(() => consume(event));
+        return delivery;
+      };
+      events.onmessage = event => opening ? early.push(event) : enqueue(event);
+      let opened;
+      try { opened = await invoke("midi_open", { inputId: entry.inputId, outputId: entry.outputId, events }); }
+      catch (error) { opening = false; early.forEach(enqueue); await delivery; throw error; }
+      entry.sessionId = opened.sessionId;
+      entry.closed = false;
+      port.in.state = port.out.state = "connected";
+      active.add(port);
+      port.out.send = async bytes => {
+        if (entry.closed) throw new Error(t("midi.closed"));
+        let timer;
+        try {
+          await Promise.race([
+            invoke("midi_send", { sessionId: entry.sessionId, bytes: Array.from(bytes) }),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(t("midi.sendTimeout"))), sendTimeout(bytes.length)); }),
+          ]);
+        } catch (error) {
+          await disconnect(port, error);
+          throw error;
+        } finally { clearTimeout(timer); }
+      };
+      opening = false;
+      early.forEach(enqueue);
+      await delivery;
+      if (entry.closed) throw new Error(t("midi.closedOnOpen"));
+      return port;
+    },
+    closePort,
+    async dispose() { await Promise.all([...active].map(port => closePort(port))); },
+  };
+}

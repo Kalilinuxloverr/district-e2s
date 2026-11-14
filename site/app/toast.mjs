@@ -1,0 +1,111 @@
+/**
+ * The one toast of the app: a small bubble bottom right. Success and info go away by themselves, an error stays until
+ * it is closed. Success and info are announced politely, errors at once (two live regions in one popover layer).
+ * Infos, warnings and errors never stand in the page itself, they all come here; a screen-reader line may keep them too.
+ * Every error carries "Frag Blechy": it opens the Blechy page, where Blechy quotes the error and walks through it.
+ */
+import { el } from "./fields.mjs";
+import { icon } from "./icons.mjs";
+import { t } from "./i18n.mjs";
+
+const AUTO_MS = 5000;
+/** The event site/app/rescue.mjs listens for (RESCUE_EVENT there; not imported, so the toast stays without the page). */
+const RESCUE_EVENT = "cee-rescue";
+/** Where an error's "Frag Blechy" goes when the caller names no topic: Blechy asks what in the app sticks. */
+const HELP_DEFAULT = "app";
+const MAX = 4;
+let polite = null;
+let assertive = null;
+
+function mount() {
+  if (polite) return;
+  const layer = el("div", { id: "app-toasts" });
+  layer.setAttribute("popover", "manual");
+  polite = el("div", { className: "cee-toast-live", id: "cee-toasts-polite" });
+  polite.setAttribute("aria-live", "polite");
+  assertive = el("div", { className: "cee-toast-live", id: "cee-toasts-assertive", role: "alert" });
+  assertive.setAttribute("aria-live", "assertive");
+  layer.append(polite, assertive);
+  document.body.append(layer);
+  raise();
+  // A dialog opened later lies above the layer and its backdrop blurs the toasts: put the layer back on top.
+  new MutationObserver(changes => { if (changes.some(c => c.target.localName === "dialog")) raise(); }).observe(document.body, { subtree: true, attributeFilter: ["open"] });
+}
+
+/** Shows the layer last in the top layer, above an open dialog. */
+function raise() {
+  const layer = document.getElementById("app-toasts");
+  try {
+    if (layer.matches(":popover-open")) layer.hidePopover();
+    layer.showPopover();
+  } catch { /* no popover support: the fixed box of the design still shows it */ }
+}
+
+/**
+ * @param {string} message
+ * @param {"ok"|"info"|"error"} [kind]
+ * @param {{stay?: boolean, action?: {label: string, run: () => void}, help?: string, helpLabel?: string}} [options] stay: an info or ok toast
+ *   that waits to be closed, like an error; action: a button in the toast that runs and closes it; help: the node of the
+ *   Blechy page (FLOW in data/rescue.mjs) an error's "Frag Blechy" opens after the quote, default the app question;
+ *   helpLabel: another label for that button, where the way to the Blechy page is the point (the patcher)
+ * @returns {() => void} closes the toast
+ */
+export function toast(message, kind = "info", { stay = false, action = null, help = HELP_DEFAULT, helpLabel = null } = {}) {
+  if (!message) return () => {};
+  mount();
+  // The same words again (a background check that fails every few seconds): the open toast stays, its time starts anew.
+  const same = [...polite.children, ...assertive.children].find(n => n.dataset.kind === kind && n.querySelector(".cee-toast-text")?.textContent === message && !n.dataset.closing);
+  if (same) { if (stay) same.keep?.(); else same.restart?.(); return same.close; }
+  const host = kind === "error" ? assertive : polite;
+  const close = el("button", { type: "button", className: "btn icon cee-toast-close", title: t("common.close") }, [icon("x")]);
+  close.setAttribute("aria-label", t("common.close"));
+  const act = action ? el("button", { type: "button", className: "btn sm cee-toast-action", textContent: action.label }) : null;
+  const ask = kind === "error" ? el("button", { type: "button", className: "btn sm cee-toast-help", textContent: helpLabel ?? t("toast.help") }) : null;
+  const node = el("div", { className: `app-toast cee-toast${kind === "ok" ? " ok" : kind === "error" ? " err" : ""}` }, [
+    el("span", { className: "cee-toast-text", textContent: message }),
+    act || ask ? el("span", { className: "cee-toast-actions" }, [act, ask].filter(Boolean)) : null,
+    close,
+  ].filter(Boolean));
+  node.dataset.kind = kind;
+  let timer = null;
+  const remove = () => {
+    clearTimeout(timer);
+    node.dataset.closing = "1";
+    node.classList.remove("visible");
+    setTimeout(() => node.remove(), 250);
+  };
+  close.addEventListener("click", remove);
+  act?.addEventListener("click", () => { remove(); action.run(); });
+  ask?.addEventListener("click", () => {
+    remove();
+    window.dispatchEvent(new CustomEvent(RESCUE_EVENT, { detail: { message, to: help } }));
+    location.hash = "rescue";
+  });
+  host.append(node);
+  raise();
+  const open = [...polite.children];
+  for (const old of open.slice(0, Math.max(0, open.length - MAX))) old.remove();
+  requestAnimationFrame(() => node.classList.add("visible"));
+  if (kind !== "error" && !stay) {
+    let kept = false;
+    const arm = () => { clearTimeout(timer); if (!kept) timer = setTimeout(remove, AUTO_MS); };
+    arm();
+    node.restart = () => { if (!node.matches(":hover, :focus-within")) arm(); };
+    node.keep = () => { kept = true; clearTimeout(timer); };
+    node.addEventListener("mouseenter", () => clearTimeout(timer));
+    node.addEventListener("mouseleave", arm);
+    node.addEventListener("focusin", () => clearTimeout(timer));
+    node.addEventListener("focusout", arm);
+  }
+  node.close = remove;
+  return remove;
+}
+
+/**
+ * `toast` for one page of the app: its errors open Blechy at the topic `help` (a node of FLOW in data/rescue.mjs) instead
+ * of the general question, so the error is answered with what that page needs. A call may still name its own `help`.
+ */
+export const toastFor = help => (message, kind, options = {}) => toast(message, kind, { help, ...options });
+
+// The design system rejects files through this name (ui.rejectFile).
+if (typeof window !== "undefined") window.showToast = (message, tone) => toast(message, tone === "err" ? "error" : tone === "ok" ? "ok" : "info");

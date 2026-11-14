@@ -1,0 +1,225 @@
+/* The Design page (splash.mjs): two tabs, Startbild and Ladeanimation, each a ui-section. Own classes carry the prefix
+   cee-; the design system's classes are used as they are. */
+.cee-splash-lead,
+.cee-splash-steps li {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.cee-splash-lead {
+  color: var(--color-text-secondary);
+}
+
+.cee-splash-work {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  align-items: flex-start;
+}
+
+.cee-splash-work[hidden] {
+  display: none;
+}
+
+/* the same colours as the emulator's display */
+.cee-splash-preview {
+  --cee-splash-ink: var(--color-print-ink);
+  --cee-splash-paper: var(--color-print-paper);
+  width: 100%;
+  max-width: calc(128px * 3);
+  aspect-ratio: 2 / 1;
+  image-rendering: pixelated;
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-sm);
+}
+
+.cee-splash-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  flex: 1 1 14rem;
+}
+
+.cee-splash-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.cee-splash-head {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+}
+
+/* The gallery: one card per picture, drawn in the colours of the display. */
+.cee-splash-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr));
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cee-splash-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-panel-alt);
+}
+
+.cee-splash-item > * {
+  margin: 0;
+}
+
+.cee-splash-thumb {
+  --cee-splash-ink: var(--color-print-ink);
+  --cee-splash-paper: var(--color-print-paper);
+  width: 100%;
+  aspect-ratio: 2 / 1;
+  image-rendering: pixelated;
+  border-radius: var(--radius-xs);
+}
+
+/* The loading animation (loading-anim.mjs): one flow from top to bottom, Laden, Galerie, Vorschau, Warte-Schleife,
+   Umwandlung, Speichern. The section's gap spaces the blocks. */
+.cee-anim [hidden] {
+  display: none;
+}
+
+/* The gallery: one slot at a time between two arrows, its line below, then slider and play. */
+.cee-anim-gallery {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 36rem;
+}
+
+.cee-anim-stage {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.cee-anim-slot {
+  position: relative;
+  aspect-ratio: 2 / 1;
+}
+
+.cee-anim-slot > .cee-anim-slot-picture {
+  display: block;
+  max-width: none;
+  height: 100%;
+}
+
+/* an empty slot: the drop field fills the picture's place */
+.cee-anim-slot > .cee-anim-slot-drop {
+  box-sizing: border-box;
+  height: 100%;
+  justify-content: center;
+}
+
+.cee-anim-slot > [hidden] {
+  display: none;
+}
+
+.cee-anim-slot-tools {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  display: flex;
+  gap: var(--space-1);
+}
+
+.cee-anim-slot-tools > .btn {
+  background: var(--color-bg-popover);
+}
+
+.cee-anim-player {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.cee-anim-player > .ui-field {
+  flex: 1 1 auto;
+}
+
+/* the preview in the emulator's display frame, as the device shows it */
+.cee-anim-lcd {
+  width: min(100%, 24rem);
+  margin: 0;
+}
+
+.cee-anim-loop {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.cee-anim-loop > * {
+  margin: 0;
+}
+
+/* the design system stretches a field's input to the full width; a percent needs no more */
+.cee-anim-percent {
+  max-width: 7rem;
+}
+
+.cee-anim-meter-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.cee-anim-meter-row > .ui-meter {
+  flex: 1 1 auto;
+}
+
+.cee-anim-save {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.cee-anim-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The editor: the pixels as large as the dialog allows, drawn with the pointer. */
+.cee-anim-editor .ui-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.cee-anim-editor .ui-dialog-body > * {
+  margin: 0;
+}
+
+.cee-anim-board {
+  max-width: none;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+/* the preview's pause button beside the percent it shows */
+.cee-anim-preview-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.cee-anim-preview-row > .ui-field-help {
+  margin: 0;
+}
